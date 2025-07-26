@@ -1,0 +1,16 @@
+# Existing dependencies (from your original project)
+streamlit
+openai
+datasets
+pandas
+numpy
+
+# LangGraph dependencies
+langgraph
+langchain
+langchain-core
+langchain-community
+
+# Additional utilities
+typing-extensions
+pydantic
