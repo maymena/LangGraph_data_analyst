@@ -7,6 +7,10 @@ from typing import TypedDict, Literal, List, Dict, Any
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 import json
+from tools.llm_utils import call_llm
+from data.download_dataset import load_dataset_df
+
+df = load_dataset_df()
 
 
 class WorkflowState(TypedDict):
@@ -20,6 +24,16 @@ class WorkflowState(TypedDict):
     final_response: str
     tools_used: List[str]
     error: str
+
+
+def user_input_node(state: WorkflowState) -> WorkflowState:
+    user_input = state.get("user_input", "")
+    if not user_input or user_input.strip() == "":
+        return {
+            **state,
+            "final_response": "This is not a valid input. Do you have any question?"
+        }
+    return state
 
 
 def question_classification_node(state: WorkflowState) -> WorkflowState:
@@ -83,23 +97,30 @@ def question_structure_analysis_node(state: WorkflowState) -> WorkflowState:
     Also determine if memory access is needed
     """
     user_input = state["user_input"]
-    
-    # TODO: Implement structure analysis
-    # Structured: specific queries (counts, distributions, examples)
-    # Unstructured: summaries, insights, analysis
-    
-    # Placeholder logic
-    structured_keywords = ["how many", "count", "distribution", "examples", "show me"]
-    unstructured_keywords = ["summarize", "analyze", "insights", "explain"]
-    
-    if any(keyword in user_input.lower() for keyword in structured_keywords):
-        structure_type = "structured"
-    else:
+
+    # LLM-based structure analysis
+    prompt = f"""Decide whether the {user_input} is a structured or unstructured question.\nThe schema of the dataset is: {str(df.dtypes.to_dict())}.\nThe unique values of the category column are: {str(list(df['category'].unique()))}.\nThe unique values of the intent column are: {str(list(df['intent'].unique()))}.\n\nGiven a user question, respond with a string 'structured' or 'unstructured'.\nStructured questions are questions that inquire about the frequency or the values of the categories in the category column or the intent column. For example:\n• 'what are all the categories'\n• 'What categories exist?' \n• 'What are all the values in the category column?'\n• 'What are all the values in the intent column?'\n• 'Show examples of category'\n• 'provide 10 examples of Category order'\n• 'which intents exist when category is account?'\n• 'do we have category order with intent other than cancel order?'\n• 'What are the most frequent categories?' \n• 'What are the most frequent intents?' \n• 'Which intents are most frequent?'\n•  'Which categories are most frequent?'\nunstructured questions are questions that answering them require using examples, insights, analysis or summary of the 'instruction' or 'response' column even if the word instruction or response is not mentioned literally in the user question. For example:\n• 'Summarize Category invoice'\n• 'Show 5 examples of intent View invoice'\n• 'Summarize how agent respond to Intent Delivery options'\n• 'what customers ask or request regarding Newsletter subscription'\n• 'give 6 examples of customer questions about contact'\n• 'can you find requests that have replies which are inadequate' \nRespond with ONLY the word 'structured' or 'unstructured' and nothing else."""
+    llm_response = call_llm(prompt)
+    structure_type = llm_response.strip().lower()
+    if structure_type not in ["structured", "unstructured"]:
         structure_type = "unstructured"
-    
-    # Check if memory query is needed
-    contains_memory_query = "previous" in user_input.lower() or "remember" in user_input.lower()
-    
+
+    # LLM-based check for follow-up/memory query
+    memory_prompt = f"""Does the following user question refer to previous answers, examples, results, or is it a follow-up to a
+     previous question?\nQuestion: {user_input}\n\nRespond with ONLY 'yes' or 'no'. 
+     For example, if the user question is "Show me more examples", "What is the total count of the last two intents?", or "what are the intents of the category I ask about", 
+     the answer is 'yes' because it is a follow-up to a previous answer or question. 
+     If the user question is 'what are the most frequent categories?', the answer is 'no' because it is not a follow-up to a previous question or answer."""
+    memory_response = call_llm(memory_prompt)
+    contains_memory_query = memory_response.strip().lower() == "yes"
+
+    # TODO: check if we need to also use:
+    # followup_phrases = [
+    #     "show me more examples", "more examples", "last two", "previous answer", "previous result", "previous examples", "previous intent", "previous category", "previous question", "previous response", "previous data", "previous output", "previously shown", "continue", "as before", "as above", "as previously", "another example", "another result", "another answer"
+    # ]
+    # contains_memory_query = any(phrase in user_input.lower() for phrase in followup_phrases)
+
+
     return {
         **state,
         "structure_type": structure_type,
@@ -214,6 +235,7 @@ def create_workflow() -> StateGraph:
     workflow = StateGraph(WorkflowState)
     
     # Add nodes
+    workflow.add_node("user_input", user_input_node)
     workflow.add_node("question_classification", question_classification_node)
     workflow.add_node("out_of_scope", out_of_scope_node)
     workflow.add_node("memory", memory_node)
@@ -223,8 +245,18 @@ def create_workflow() -> StateGraph:
     workflow.add_node("access_memory", access_memory_node)
     workflow.add_node("summarization", summarization_node)
     
-    # Set entry point
-    workflow.set_entry_point("question_classification")
+    # Set entry point to user_input node
+    workflow.set_entry_point("user_input")
+    
+    # Add conditional edge: if input is valid, go to question_classification; else, go to summarization
+    workflow.add_conditional_edges(
+        "user_input",
+        lambda state: "summarization" if state.get("final_response") else "question_classification",
+        {
+            "summarization": "summarization",
+            "question_classification": "question_classification"
+        }
+    )
     
     # Add conditional edges based on question type
     workflow.add_conditional_edges(
