@@ -2,6 +2,13 @@ import os
 from typing import Optional
 from openai import OpenAI
 
+# Try to load from .env file if available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # Initialize OpenAI client with API key from environment
 api_key = os.environ.get("NEBIUS_API_KEY")
 if not api_key:

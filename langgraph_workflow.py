@@ -45,21 +45,95 @@ def question_classification_node(state: WorkflowState) -> WorkflowState:
     """
     user_input = state["user_input"]
     
-    # TODO: Implement classification logic
-    # This could use LLM classification or rule-based approach
-    
-    # Placeholder logic
-    if "dataset" not in user_input.lower() and "customer" not in user_input.lower():
-        question_type = "out_of_scope"
-    elif "remember" in user_input.lower() or "previous" in user_input.lower():
-        question_type = "memory"
-    else:
-        question_type = "standard"
+    # Create classification prompt for LLM
+    classification_prompt = f"""You are a question classifier for a customer service dataset Q&A system. 
+
+The dataset contains customer service conversations with the following columns:
+- instruction: Customer queries/requests
+- category: Service categories (like 'account', 'order', 'delivery', 'payment', etc.)
+- intent: Specific customer intents (like 'cancel_order', 'get_refund', 'track_order', etc.)
+- response: Agent responses to customer queries
+
+Classify the following user question into exactly one of these three categories:
+
+1. "out_of_scope" - Questions that are completely unrelated to customer service data analysis:
+   - General knowledge questions (weather, cooking, movies, sports, politics)
+   - Personal questions not about the dataset
+   - Questions about topics outside customer service domain
+   Examples: "What's the weather?", "How do I cook pasta?", "Tell me about sports"
+
+2. "memory" - Questions that explicitly reference previous interactions or conversations:
+   - Questions using words like "remember", "previous", "before", "earlier", "last time"
+   - Questions asking "what did you tell me", "from our conversation", "you mentioned"
+   - Follow-up questions referencing prior specific answers or results
+   Examples: "What did you tell me before?", "Remember the categories we discussed?", "Show me more examples from the previous result"
+
+3. "standard" - Questions that require analyzing the customer service dataset:
+   - Questions about categories, intents, distributions, counts, examples
+   - Questions asking for summaries, insights, or analysis of customer service data
+   - Questions about customer service patterns, agent responses, or dataset content
+   - Questions that mention dataset-related terms even if phrased generally
+   Examples: "How many refund requests?", "What are common categories?", "Summarize delivery issues", "What was the last intent you mentioned?" (this refers to dataset intents)
+
+Important: If a question mentions dataset-related terms like "intent", "category", "refund", "order", etc., it should be classified as "standard" even if it uses words like "last" or "previous".
+
+User question: "{user_input}"
+
+Respond with ONLY one word: "out_of_scope", "memory", or "standard"."""
+
+    try:
+        # Call LLM for classification
+        llm_response = call_llm(classification_prompt)
+        question_type = llm_response.strip().lower()
+        
+        # Validate response and fallback to rule-based if needed
+        if question_type not in ["out_of_scope", "memory", "standard"]:
+            # Fallback to simple rule-based classification
+            question_type = _fallback_classification(user_input)
+            
+    except Exception as e:
+        # If LLM call fails, use fallback classification
+        question_type = _fallback_classification(user_input)
     
     return {
         **state,
         "question_type": question_type
     }
+
+
+def _fallback_classification(user_input: str) -> str:
+    """Fallback rule-based classification if LLM fails"""
+    user_input_lower = user_input.lower()
+    
+    # Check for dataset-related keywords first (higher priority)
+    dataset_keywords = ["category", "intent", "customer", "service", "agent", "response", 
+                       "refund", "order", "delivery", "account", "dataset", "data",
+                       "cancel", "track", "payment", "billing", "support"]
+    has_dataset_keywords = any(keyword in user_input_lower for keyword in dataset_keywords)
+    
+    # Check for memory-related keywords
+    memory_keywords = ["remember", "previous", "before", "earlier", "last time", 
+                      "you said", "we discussed", "from before", "what did you tell me",
+                      "you mentioned", "from our conversation"]
+    has_memory_keywords = any(keyword in user_input_lower for keyword in memory_keywords)
+    
+    # If it has dataset keywords, it's standard (even if it has memory keywords)
+    if has_dataset_keywords:
+        return "standard"
+    
+    # If it has memory keywords but no dataset keywords, it's memory
+    if has_memory_keywords:
+        return "memory"
+    
+    # Check for clearly out-of-scope topics
+    out_of_scope_keywords = ["weather", "sports", "politics", "news", "movie", "music", 
+                            "recipe", "cook", "travel", "health", "personal", "pasta",
+                            "favorite", "hobby"]
+    if any(keyword in user_input_lower for keyword in out_of_scope_keywords):
+        return "out_of_scope"
+    
+    # Default to standard if unclear
+    return "standard"
 
 
 def out_of_scope_node(state: WorkflowState) -> WorkflowState:
