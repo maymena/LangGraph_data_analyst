@@ -8,6 +8,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 import json
 from tools.llm_utils import call_llm
+from tools.session_memory import access_session_memory, should_use_session_memory
 from data.download_dataset import load_dataset_df
 
 df = load_dataset_df()
@@ -24,6 +25,7 @@ class WorkflowState(TypedDict):
     final_response: str
     tools_used: List[str]
     error: str
+    session_memory: List[Dict[str, Any]]  # Current session interactions
 
 
 def user_input_node(state: WorkflowState) -> WorkflowState:
@@ -214,6 +216,16 @@ def structured_processing_node(state: WorkflowState) -> WorkflowState:
     - show_examples
     """
     user_input = state["user_input"]
+    session_memory = state.get("session_memory", [])
+    
+    # Check if this question should use session memory
+    if should_use_session_memory(user_input, session_memory):
+        response = access_session_memory(user_input, session_memory)
+        return {
+            **state,
+            "final_response": response,
+            "tools_used": ["session_memory"]
+        }
     
     # TODO: Implement structured processing
     # - Parse the question to identify required tools
@@ -238,6 +250,16 @@ def unstructured_processing_node(state: WorkflowState) -> WorkflowState:
     - Create summaries
     """
     user_input = state["user_input"]
+    session_memory = state.get("session_memory", [])
+    
+    # Check if this question should use session memory
+    if should_use_session_memory(user_input, session_memory):
+        response = access_session_memory(user_input, session_memory)
+        return {
+            **state,
+            "final_response": response,
+            "tools_used": ["session_memory"]
+        }
     
     # TODO: Implement unstructured processing
     # - Use summarize tool
@@ -381,8 +403,11 @@ def create_workflow() -> StateGraph:
     return workflow
 
 
-def run_workflow(user_input: str) -> str:
+def run_workflow(user_input: str, session_memory: List[Dict[str, Any]] = None) -> str:
     """Run the workflow with user input and return the response"""
+    
+    if session_memory is None:
+        session_memory = []
     
     workflow = create_workflow()
     app = workflow.compile()
@@ -397,7 +422,8 @@ def run_workflow(user_input: str) -> str:
         "processing_results": [],
         "final_response": "",
         "tools_used": [],
-        "error": ""
+        "error": "",
+        "session_memory": session_memory
     }
     
     # Run the workflow
