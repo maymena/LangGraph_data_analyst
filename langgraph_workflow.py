@@ -3,13 +3,15 @@ LangGraph Workflow for Customer Service Dataset Q&A Agent
 Refactored from ReAct agent to LangGraph workflow
 """
 
-from typing import TypedDict, Literal, List, Dict, Any
+from typing import TypedDict, Literal, List, Dict, Any, Optional
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 import json
 from tools.llm_utils import call_llm
 from tools.session_memory import access_session_memory, should_use_session_memory
 from data.download_dataset import load_dataset_df
+from tools.tool_functions import TOOL_FUNCTIONS
+import datetime
 
 df = load_dataset_df()
 
@@ -204,20 +206,95 @@ def question_structure_analysis_node(state: WorkflowState) -> WorkflowState:
     }
 
 
+def react_loop(system_prompt: str, user_input: str, allowed_tools: List[str]) -> tuple[str, List[Dict[str, Any]], List[str]]:
+    """
+    Execute a ReAct loop with the given system prompt, user input, and allowed tools.
+    
+    Args:
+        system_prompt: The system prompt for the LLM
+        user_input: The user's question
+        allowed_tools: List of tool names that are allowed to be used
+        
+    Returns:
+        tuple: (final_response, processing_results, tools_used)
+    """
+    # ReAct loop
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_input}
+    ]
+    tools_used = []
+    max_steps = 8
+    step = 0
+    final_response = None
+    processing_results = []
+
+    while step < max_steps:
+        step += 1
+        # Call the LLM
+        response = call_llm(prompt=json.dumps(messages))
+        try:
+            response_message = json.loads(response) if isinstance(response, str) and response.strip().startswith('{') else response
+        except Exception:
+            response_message = response
+
+        # If the LLM returns a function call (tool use)
+        if isinstance(response_message, dict) and "tool_call" in response_message:
+            tool_call = response_message["tool_call"]
+            function_name = tool_call["function_name"]
+            function_args = tool_call.get("function_args", {})
+            
+            # Check if the tool is allowed
+            if function_name not in allowed_tools:
+                tool_result = {"error": f"Tool {function_name} is not allowed. Allowed tools: {allowed_tools}"}
+            else:
+                if function_name not in tools_used:
+                    tools_used.append(function_name)
+                if function_name == "finish":
+                    final_response = tool_call.get("answer", "No answer provided.")
+                    break
+                # Execute the tool
+                if function_name in TOOL_FUNCTIONS:
+                    try:
+                        tool_result = TOOL_FUNCTIONS[function_name](**function_args)
+                    except Exception as e:
+                        tool_result = {"error": str(e)}
+                else:
+                    tool_result = {"error": f"Tool {function_name} not implemented."}
+            
+            processing_results.append({"tool": function_name, "args": function_args, "result": tool_result})
+            # Add tool result to messages for next LLM step
+            messages.append({
+                "role": "tool",
+                "name": function_name,
+                "content": json.dumps(tool_result)
+            })
+        else:
+            # If no tool call, treat response as final answer
+            final_response = response_message if isinstance(response_message, str) else str(response_message)
+            break
+
+    if final_response is None:
+        final_response = "Reached maximum number of steps without a final answer."
+
+    return final_response, processing_results, tools_used
+
+
 def structured_processing_node(state: WorkflowState) -> WorkflowState:
     """
-    Handle structured questions using dataset tools
-    - select_semantic_intent
-    - select_semantic_category  
-    - count_category
-    - count_intent
-    - get_intent_distribution
-    - get_category_distribution
-    - show_examples
+    Handle structured questions using dataset tools via LLM ReAct approach.
+    The LLM can use only the following tools:
+    - select_semantic_intent(intent_name: List[str])
+    - select_semantic_category(category_name: List[str])
+    - sum_numbers(a: float, b: float)
+    - count_category(category: str)
+    - count_intent(intent: str)
+    - get_intent_distribution(top_n: int = 10, category: Optional[str] = None)
+    - get_category_distribution(top_n: int = 10)
     """
     user_input = state["user_input"]
     session_memory = state.get("session_memory", [])
-    
+
     # Check if this question should use session memory
     if should_use_session_memory(user_input, session_memory):
         response = access_session_memory(user_input, session_memory)
@@ -226,32 +303,57 @@ def structured_processing_node(state: WorkflowState) -> WorkflowState:
             "final_response": response,
             "tools_used": ["session_memory"]
         }
-    
-    # TODO: Implement structured processing
-    # - Parse the question to identify required tools
-    # - Call appropriate dataset functions
-    # - Format results
-    
-    processing_results = []  # Placeholder for tool results
-    tools_used = []  # Track which tools were used
-    
+
+    system_prompt = (
+        "You are an AI assistant that helps answer questions about a customer service dataset.\n"
+        "You have access to the following tools that can query and analyze the dataset:\n"
+        "- select_semantic_intent(intent_name: List[str]): Select conversations with specific intents.\n"
+        "- select_semantic_category(category_name: List[str]): Select conversations with specific categories.\n"
+        "- sum_numbers(a: float, b: float): Add two numbers.\n"
+        "- count_category(category: str): Count conversations in a category.\n"
+        "- count_intent(intent: str): Count conversations with an intent.\n"
+        "- get_intent_distribution(top_n: int = 10, category: Optional[str] = None): Get the distribution of intents.\n"
+        "- get_category_distribution(top_n: int = 10): Get the distribution of categories.\n"
+        "\n"
+        "Follow these steps:\n"
+        "1. Understand the user's question.\n"
+        "2. Determine which tools you need to use to answer the question.\n"
+        "3. Call the appropriate tools with the right parameters.\n"
+        "4. Synthesize the results into a clear answer.\n"
+        "5. When you have the final answer, call the finish tool.\n"
+        "\n"
+        "The dataset contains customer service conversations with intents and categories.\n"
+        "The dataset includes various intents like edit_account, switch_account, check_invoice, etc.\n"
+        "Categories include ACCOUNT, ORDER, REFUND, INVOICE, etc.\n"
+        "\n"
+        "For out-of-scope questions not related to the dataset, politely explain that you can only answer questions about the customer service dataset.\n"
+        "You are only allowed to use the tools listed above."
+    )
+
+    allowed_tools = ["select_semantic_intent", "select_semantic_category", "sum_numbers", "count_category", "count_intent", "get_intent_distribution", "get_category_distribution"]
+    final_response, processing_results, tools_used = react_loop(system_prompt, user_input, allowed_tools)
+
     return {
         **state,
         "processing_results": processing_results,
+        "final_response": final_response,
         "tools_used": tools_used
     }
 
 
 def unstructured_processing_node(state: WorkflowState) -> WorkflowState:
     """
-    Handle unstructured questions requiring analysis and summarization
-    - Use LLM for analysis
-    - Generate insights
-    - Create summaries
+    Handle unstructured questions requiring analysis and summarization using LLM ReAct approach.
+    The LLM can use only the following tools:
+    - select_semantic_intent(intent_name: List[str])
+    - select_semantic_category(category_name: List[str])
+    - show_examples(n: int = 3, intent: Optional[str] = None, category: Optional[str] = None)
+    - summarize(user_request: str, intent: Optional[str] = None, category: Optional[str] = None)
+    - show_dataframe(data_type: str = "all", limit: int = 20)
     """
     user_input = state["user_input"]
     session_memory = state.get("session_memory", [])
-    
+
     # Check if this question should use session memory
     if should_use_session_memory(user_input, session_memory):
         response = access_session_memory(user_input, session_memory)
@@ -260,18 +362,38 @@ def unstructured_processing_node(state: WorkflowState) -> WorkflowState:
             "final_response": response,
             "tools_used": ["session_memory"]
         }
-    
-    # TODO: Implement unstructured processing
-    # - Use summarize tool
-    # - Generate insights using LLM
-    # - Combine with dataset queries if needed
-    
-    processing_results = []  # Placeholder
-    tools_used = ["summarize"]  # Placeholder
-    
+
+    system_prompt = (
+        "You are an AI assistant that helps answer unstructured questions about a customer service dataset.\n"
+        "You have access to the following tools that can query and analyze the dataset:\n"
+        "- select_semantic_intent(intent_name: List[str]): Select conversations with specific intents.\n"
+        "- select_semantic_category(category_name: List[str]): Select conversations with specific categories.\n"
+        "- show_examples(n: int = 3, intent: Optional[str] = None, category: Optional[str] = None): Show n example conversations.\n"
+        "- summarize(user_request: str, intent: Optional[str] = None, category: Optional[str] = None): Generate a summary based on user request.\n"
+        "- show_dataframe(data_type: str = \"all\", limit: int = 20): Show the dataset as a pandas dataframe.\n"
+        "\n"
+        "Follow these steps:\n"
+        "1. Understand the user's question (summarize, analyze, show examples, etc.).\n"
+        "2. Determine which tools you need to use to answer the question.\n"
+        "3. Call the appropriate tools with the right parameters.\n"
+        "4. Synthesize the results into a clear, comprehensive answer.\n"
+        "5. When you have the final answer, call the finish tool.\n"
+        "\n"
+        "The dataset contains customer service conversations with intents and categories.\n"
+        "The dataset includes various intents like edit_account, switch_account, check_invoice, etc.\n"
+        "Categories include ACCOUNT, ORDER, REFUND, INVOICE, etc.\n"
+        "\n"
+        "For unstructured questions, focus on providing insights, summaries, and examples rather than just counts or distributions.\n"
+        "You are only allowed to use the tools listed above."
+    )
+
+    allowed_tools = ["select_semantic_intent", "select_semantic_category", "show_examples", "summarize", "show_dataframe"]
+    final_response, processing_results, tools_used = react_loop(system_prompt, user_input, allowed_tools)
+
     return {
         **state,
         "processing_results": processing_results,
+        "final_response": final_response,
         "tools_used": tools_used
     }
 
@@ -302,26 +424,53 @@ def summarization_node(state: WorkflowState) -> WorkflowState:
     user_input = state["user_input"]
     processing_results = state.get("processing_results", [])
     memory_results = state.get("memory_results", [])
+    session_memory = state.get("session_memory", [])
+    tools_used = state.get("tools_used", [])
     
     # If we already have a final response (from out_of_scope or memory nodes), use it
     if state.get("final_response"):
         final_response = state["final_response"]
     else:
-        # TODO: Implement response generation
-        # - Combine processing results
-        # - Format for user consumption
-        # - Generate coherent narrative
-        final_response = "Generated response based on analysis..."  # Placeholder
+        # Use LLM to generate a coherent response from all available information
+        summary_prompt = f"""
+        Generate a coherent, user-friendly response based on the following information:
+
+        User Question: {user_input}
+        
+        Processing Results: {json.dumps(processing_results, indent=2)}
+        
+        Memory Results: {json.dumps(memory_results, indent=2)}
+        
+        Session Memory (recent interactions): {json.dumps(session_memory[-3:] if session_memory else [], indent=2)}
+        
+        Tools Used: {tools_used}
+
+        Please create a clear, comprehensive response that:
+        1. Directly answers the user's question
+        2. Incorporates relevant information from processing results
+        3. References previous context if available in session memory
+        4. Is conversational and helpful
+        5. Avoids technical jargon unless necessary
+        
+        """
+        
+        final_response = call_llm(prompt=summary_prompt)
     
-    # TODO: Save to memory
-    # - Store user query
-    # - Store response
-    # - Store tools used
-    # - Store timestamp
+    # Save interaction to session memory
+    interaction = {
+        "timestamp": datetime.datetime.now().isoformat(),
+        "user_query": user_input,
+        "response": final_response,
+        "tools_used": tools_used,
+        "processing_results": processing_results,
+        "memory_results": memory_results
+    }
+    session_memory.append(interaction)
     
     return {
         **state,
-        "final_response": final_response
+        "final_response": final_response,
+        "session_memory": session_memory
     }
 
 
