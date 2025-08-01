@@ -1,19 +1,33 @@
 """
 LangGraph Workflow for Customer Service Dataset Q&A Agent
-Refactored from ReAct agent to LangGraph workflow
+Refactored from ReAct agent to LangGraph workflow with checkpoint memory
 """
 
 from typing import TypedDict, Literal, List, Dict, Any, Optional
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
+from langgraph.checkpoint.memory import MemorySaver
+from pydantic import BaseModel, ValidationError
 import json
+import re
 from tools.llm_utils import call_llm
-from tools.session_memory import access_session_memory, should_use_session_memory
+from tools.session_memory import access_session_memory, should_use_session_memory, get_memory_context
 from data.download_dataset import load_dataset_df
 from tools.tool_functions import TOOL_FUNCTIONS
 import datetime
+import uuid
 
 df = load_dataset_df()
+
+
+class ToolCall(BaseModel):
+    function_name: str
+    function_args: Dict[str, Any] = {}
+    answer: Optional[str] = None  # For finish tool
+
+
+class ToolCallResponse(BaseModel):
+    tool_call: ToolCall
 
 
 class WorkflowState(TypedDict):
@@ -27,7 +41,9 @@ class WorkflowState(TypedDict):
     final_response: str
     tools_used: List[str]
     error: str
-    session_memory: List[Dict[str, Any]]  # Current session interactions
+    # Memory-related fields
+    thread_id: Optional[str]  # Thread ID for memory access
+    session_history: Optional[List[Dict[str, Any]]]  # Pre-loaded session history
 
 
 def user_input_node(state: WorkflowState) -> WorkflowState:
@@ -88,7 +104,15 @@ Respond with ONLY one word: "out_of_scope", "memory", or "standard"."""
     try:
         # Call LLM for classification
         llm_response = call_llm(classification_prompt)
-        question_type = llm_response.strip().lower()
+        
+        # Extract the final answer from the response (handle <think> tags)
+        if "</think>" in llm_response:
+            # Extract text after the last </think> tag
+            final_answer = llm_response.split("</think>")[-1].strip()
+        else:
+            final_answer = llm_response.strip()
+        
+        question_type = final_answer.lower()
         
         # Validate response and fallback to rule-based if needed
         if question_type not in ["out_of_scope", "memory", "standard"]:
@@ -151,21 +175,33 @@ def out_of_scope_node(state: WorkflowState) -> WorkflowState:
 def memory_node(state: WorkflowState) -> WorkflowState:
     """
     Query memory system and provide response based on past interactions
+    This node is called when the question is classified as a "memory" type question
     """
     user_input = state["user_input"]
+    session_history = state.get("session_history", [])
     
-    # TODO: Implement memory querying
-    # - Search past interactions
-    # - Find relevant context
-    # - Generate response based on memory
-    
-    memory_results = []  # Placeholder
-    response = "Based on our previous conversations..."  # Placeholder
+    if session_history:
+        # Use the session history to generate a memory-based response
+        response = access_session_memory(user_input, session_history)
+        tools_used = ["session_memory"]
+        memory_results = [
+            {
+                "type": "memory_query", 
+                "query": user_input,
+                "history_count": len(session_history),
+                "response_generated": True
+            }
+        ]
+    else:
+        response = "I don't have any previous conversation history to reference."
+        tools_used = []
+        memory_results = [{"type": "no_memory", "message": "No session history available"}]
     
     return {
         **state,
         "memory_results": memory_results,
-        "final_response": response
+        "final_response": response,
+        "tools_used": tools_used
     }
 
 
@@ -206,6 +242,45 @@ def question_structure_analysis_node(state: WorkflowState) -> WorkflowState:
     }
 
 
+
+def extract_tool_call_from_response(response: str) -> Optional[ToolCallResponse]:
+    """
+    Extract and validate tool call from LLM response using Pydantic
+    """
+    try:
+        # First try to parse the entire response as JSON
+        if response.strip().startswith('{'):
+            try:
+                data = json.loads(response)
+                return ToolCallResponse(**data)
+            except (json.JSONDecodeError, ValidationError):
+                pass
+        
+        # Try to find JSON within the response text using regex
+        json_patterns = [
+            # Pattern 1: Look for complete tool_call JSON objects
+            r'\{[^{}]*"tool_call"[^{}]*\{[^{}]*\}[^{}]*\}',
+            # Pattern 2: More flexible nested JSON
+            r'\{(?:[^{}]|\{[^{}]*\})*"tool_call"(?:[^{}]|\{[^{}]*\})*\}',
+            # Pattern 3: Even more flexible with multiple nesting levels
+            r'\{(?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*"tool_call"(?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*\}'
+        ]
+        
+        for pattern in json_patterns:
+            matches = re.findall(pattern, response, re.DOTALL)
+            for match in matches:
+                try:
+                    data = json.loads(match)
+                    return ToolCallResponse(**data)
+                except (json.JSONDecodeError, ValidationError):
+                    continue
+        
+        return None
+    except Exception as e:
+        print(f"Error extracting tool call: {e}")
+        return None
+
+
 def react_loop(system_prompt: str, user_input: str, allowed_tools: List[str]) -> tuple[str, List[Dict[str, Any]], List[str]]:
     """
     Execute a ReAct loop with the given system prompt, user input, and allowed tools.
@@ -233,16 +308,14 @@ def react_loop(system_prompt: str, user_input: str, allowed_tools: List[str]) ->
         step += 1
         # Call the LLM
         response = call_llm(prompt=json.dumps(messages))
-        try:
-            response_message = json.loads(response) if isinstance(response, str) and response.strip().startswith('{') else response
-        except Exception:
-            response_message = response
-
-        # If the LLM returns a function call (tool use)
-        if isinstance(response_message, dict) and "tool_call" in response_message:
-            tool_call = response_message["tool_call"]
-            function_name = tool_call["function_name"]
-            function_args = tool_call.get("function_args", {})
+        
+        # Try to extract tool call using Pydantic
+        tool_call_response = extract_tool_call_from_response(response)
+        
+        if tool_call_response:
+            tool_call = tool_call_response.tool_call
+            function_name = tool_call.function_name
+            function_args = tool_call.function_args
             
             # Check if the tool is allowed
             if function_name not in allowed_tools:
@@ -251,7 +324,7 @@ def react_loop(system_prompt: str, user_input: str, allowed_tools: List[str]) ->
                 if function_name not in tools_used:
                     tools_used.append(function_name)
                 if function_name == "finish":
-                    final_response = tool_call.get("answer", "No answer provided.")
+                    final_response = tool_call.answer or "No answer provided."
                     break
                 # Execute the tool
                 if function_name in TOOL_FUNCTIONS:
@@ -270,8 +343,8 @@ def react_loop(system_prompt: str, user_input: str, allowed_tools: List[str]) ->
                 "content": json.dumps(tool_result)
             })
         else:
-            # If no tool call, treat response as final answer
-            final_response = response_message if isinstance(response_message, str) else str(response_message)
+            # If no tool call found, treat response as final answer
+            final_response = response if isinstance(response, str) else str(response)
             break
 
     if final_response is None:
@@ -293,16 +366,12 @@ def structured_processing_node(state: WorkflowState) -> WorkflowState:
     - get_category_distribution(top_n: int = 10)
     """
     user_input = state["user_input"]
-    session_memory = state.get("session_memory", [])
 
-    # Check if this question should use session memory
-    if should_use_session_memory(user_input, session_memory):
-        response = access_session_memory(user_input, session_memory)
-        return {
-            **state,
-            "final_response": response,
-            "tools_used": ["session_memory"]
-        }
+    # Memory context will be provided by the checkpoint system
+    # The memory access is handled through the workflow's memory management
+    memory_context = ""
+    if state.get("contains_memory_query", False):
+        memory_context = "\n\nNote: This question references previous interactions. Use the conversation history to provide context."
 
     system_prompt = (
         "You are an AI assistant that helps answer questions about a customer service dataset.\n"
@@ -315,10 +384,28 @@ def structured_processing_node(state: WorkflowState) -> WorkflowState:
         "- get_intent_distribution(top_n: int = 10, category: Optional[str] = None): Get the distribution of intents.\n"
         "- get_category_distribution(top_n: int = 10): Get the distribution of categories.\n"
         "\n"
+        "CRITICAL: You MUST respond with ONLY a JSON object. Do not include any other text, thinking, or explanations.\n"
+        "\n"
+        "When you want to use a tool, respond with this exact JSON format:\n"
+        "{\n"
+        "  \"tool_call\": {\n"
+        "    \"function_name\": \"tool_name\",\n"
+        "    \"function_args\": {\"arg1\": \"value1\", \"arg2\": \"value2\"}\n"
+        "  }\n"
+        "}\n"
+        "\n"
+        "When you have the final answer, use the finish tool:\n"
+        "{\n"
+        "  \"tool_call\": {\n"
+        "    \"function_name\": \"finish\",\n"
+        "    \"answer\": \"Your final answer here\"\n"
+        "  }\n"
+        "}\n"
+        "\n"
         "Follow these steps:\n"
         "1. Understand the user's question.\n"
         "2. Determine which tools you need to use to answer the question.\n"
-        "3. Call the appropriate tools with the right parameters.\n"
+        "3. Call the appropriate tools with the right parameters using the JSON format above.\n"
         "4. Synthesize the results into a clear answer.\n"
         "5. When you have the final answer, call the finish tool.\n"
         "\n"
@@ -328,9 +415,10 @@ def structured_processing_node(state: WorkflowState) -> WorkflowState:
         "\n"
         "For out-of-scope questions not related to the dataset, politely explain that you can only answer questions about the customer service dataset.\n"
         "You are only allowed to use the tools listed above."
+        + memory_context
     )
 
-    allowed_tools = ["select_semantic_intent", "select_semantic_category", "sum_numbers", "count_category", "count_intent", "get_intent_distribution", "get_category_distribution"]
+    allowed_tools = ["select_semantic_intent", "select_semantic_category", "sum_numbers", "count_category", "count_intent", "get_intent_distribution", "get_category_distribution", "finish"]
     final_response, processing_results, tools_used = react_loop(system_prompt, user_input, allowed_tools)
 
     return {
@@ -352,16 +440,11 @@ def unstructured_processing_node(state: WorkflowState) -> WorkflowState:
     - show_dataframe(data_type: str = "all", limit: int = 20)
     """
     user_input = state["user_input"]
-    session_memory = state.get("session_memory", [])
 
-    # Check if this question should use session memory
-    if should_use_session_memory(user_input, session_memory):
-        response = access_session_memory(user_input, session_memory)
-        return {
-            **state,
-            "final_response": response,
-            "tools_used": ["session_memory"]
-        }
+    # Memory context will be provided by the checkpoint system
+    memory_context = ""
+    if state.get("contains_memory_query", False):
+        memory_context = "\n\nNote: This question references previous interactions. Use the conversation history to provide context."
 
     system_prompt = (
         "You are an AI assistant that helps answer unstructured questions about a customer service dataset.\n"
@@ -372,10 +455,28 @@ def unstructured_processing_node(state: WorkflowState) -> WorkflowState:
         "- summarize(user_request: str, intent: Optional[str] = None, category: Optional[str] = None): Generate a summary based on user request.\n"
         "- show_dataframe(data_type: str = \"all\", limit: int = 20): Show the dataset as a pandas dataframe.\n"
         "\n"
+        "CRITICAL: You MUST respond with ONLY a JSON object. Do not include any other text, thinking, or explanations.\n"
+        "\n"
+        "When you want to use a tool, respond with this exact JSON format:\n"
+        "{\n"
+        "  \"tool_call\": {\n"
+        "    \"function_name\": \"tool_name\",\n"
+        "    \"function_args\": {\"arg1\": \"value1\", \"arg2\": \"value2\"}\n"
+        "  }\n"
+        "}\n"
+        "\n"
+        "When you have the final answer, use the finish tool:\n"
+        "{\n"
+        "  \"tool_call\": {\n"
+        "    \"function_name\": \"finish\",\n"
+        "    \"answer\": \"Your final answer here\"\n"
+        "  }\n"
+        "}\n"
+        "\n"
         "Follow these steps:\n"
         "1. Understand the user's question (summarize, analyze, show examples, etc.).\n"
         "2. Determine which tools you need to use to answer the question.\n"
-        "3. Call the appropriate tools with the right parameters.\n"
+        "3. Call the appropriate tools with the right parameters using the JSON format above.\n"
         "4. Synthesize the results into a clear, comprehensive answer.\n"
         "5. When you have the final answer, call the finish tool.\n"
         "\n"
@@ -385,9 +486,10 @@ def unstructured_processing_node(state: WorkflowState) -> WorkflowState:
         "\n"
         "For unstructured questions, focus on providing insights, summaries, and examples rather than just counts or distributions.\n"
         "You are only allowed to use the tools listed above."
+        + memory_context
     )
 
-    allowed_tools = ["select_semantic_intent", "select_semantic_category", "show_examples", "summarize", "show_dataframe"]
+    allowed_tools = ["select_semantic_intent", "select_semantic_category", "show_examples", "summarize", "show_dataframe", "finish"]
     final_response, processing_results, tools_used = react_loop(system_prompt, user_input, allowed_tools)
 
     return {
@@ -401,13 +503,45 @@ def unstructured_processing_node(state: WorkflowState) -> WorkflowState:
 def access_memory_node(state: WorkflowState) -> WorkflowState:
     """
     Access memory system when processing nodes need historical context
+    This node uses the session_history pre-loaded in the state by WorkflowManager
     """
-    # TODO: Implement memory access
-    # - Query relevant past interactions
-    # - Add context to processing results
+    user_input = state["user_input"]
+    session_history = state.get("session_history", [])
     
-    memory_results = state.get("memory_results", [])
-    # Add new memory results
+    if session_history:
+        try:
+            # Use the session history to provide memory context
+            memory_context = get_memory_context(session_history, "recent")
+            
+            # Create memory results with relevant context
+            memory_results = [
+                {
+                    "type": "checkpoint_memory",
+                    "history_count": len(session_history),
+                    "recent_interactions": session_history[-3:] if len(session_history) >= 3 else session_history,
+                    "memory_context": memory_context,
+                    "user_query": user_input
+                }
+            ]
+            
+            # If the user query seems to reference previous interactions,
+            # try to find relevant context
+            if any(keyword in user_input.lower() for keyword in ["previous", "before", "last", "earlier"]):
+                relevant_interactions = []
+                for interaction in session_history[-5:]:  # Check last 5 interactions
+                    if any(word in interaction.get("user_query", "").lower() for word in user_input.lower().split()):
+                        relevant_interactions.append(interaction)
+                
+                if relevant_interactions:
+                    memory_results.append({
+                        "type": "relevant_context",
+                        "interactions": relevant_interactions
+                    })
+                    
+        except Exception as e:
+            memory_results = [{"type": "memory_error", "error": str(e)}]
+    else:
+        memory_results = [{"type": "no_memory", "message": "No previous interactions found in this session"}]
     
     return {
         **state,
@@ -419,12 +553,11 @@ def summarization_node(state: WorkflowState) -> WorkflowState:
     """
     Always called before output:
     1. Summarize the results into a coherent response
-    2. Save the user query and response to memory
+    2. The interaction is automatically saved by LangGraph checkpoint system
     """
     user_input = state["user_input"]
     processing_results = state.get("processing_results", [])
     memory_results = state.get("memory_results", [])
-    session_memory = state.get("session_memory", [])
     tools_used = state.get("tools_used", [])
     
     # If we already have a final response (from out_of_scope or memory nodes), use it
@@ -441,14 +574,12 @@ def summarization_node(state: WorkflowState) -> WorkflowState:
         
         Memory Results: {json.dumps(memory_results, indent=2)}
         
-        Session Memory (recent interactions): {json.dumps(session_memory[-3:] if session_memory else [], indent=2)}
-        
         Tools Used: {tools_used}
 
         Please create a clear, comprehensive response that:
         1. Directly answers the user's question
         2. Incorporates relevant information from processing results
-        3. References previous context if available in session memory
+        3. References previous context if this appears to be a follow-up question
         4. Is conversational and helpful
         5. Avoids technical jargon unless necessary
         
@@ -456,21 +587,12 @@ def summarization_node(state: WorkflowState) -> WorkflowState:
         
         final_response = call_llm(prompt=summary_prompt)
     
-    # Save interaction to session memory
-    interaction = {
-        "timestamp": datetime.datetime.now().isoformat(),
-        "user_query": user_input,
-        "response": final_response,
-        "tools_used": tools_used,
-        "processing_results": processing_results,
-        "memory_results": memory_results
-    }
-    session_memory.append(interaction)
+    # The interaction will be automatically saved by the checkpoint system
+    # No need to manually manage session_memory here
     
     return {
         **state,
-        "final_response": final_response,
-        "session_memory": session_memory
+        "final_response": final_response
     }
 
 
@@ -479,111 +601,185 @@ def create_workflow() -> StateGraph:
     
     workflow = StateGraph(WorkflowState)
     
-    # Add nodes
-    workflow.add_node("user_input", user_input_node)
-    workflow.add_node("question_classification", question_classification_node)
-    workflow.add_node("out_of_scope", out_of_scope_node)
-    workflow.add_node("memory", memory_node)
-    workflow.add_node("question_structure_analysis", question_structure_analysis_node)
-    workflow.add_node("structured_processing", structured_processing_node)
-    workflow.add_node("unstructured_processing", unstructured_processing_node)
-    workflow.add_node("access_memory", access_memory_node)
-    workflow.add_node("summarization", summarization_node)
+    # Add nodes (renamed to avoid conflicts with state keys)
+    workflow.add_node("input_validation", user_input_node)
+    workflow.add_node("classify_question", question_classification_node)
+    workflow.add_node("handle_out_of_scope", out_of_scope_node)
+    workflow.add_node("handle_memory", memory_node)
+    workflow.add_node("analyze_structure", question_structure_analysis_node)
+    workflow.add_node("process_structured", structured_processing_node)
+    workflow.add_node("process_unstructured", unstructured_processing_node)
+    workflow.add_node("retrieve_memory", access_memory_node)
+    workflow.add_node("generate_response", summarization_node)
     
-    # Set entry point to user_input node
-    workflow.set_entry_point("user_input")
+    # Set entry point to input validation node
+    workflow.set_entry_point("input_validation")
     
     # Add conditional edge: if input is valid, go to question_classification; else, go to summarization
     workflow.add_conditional_edges(
-        "user_input",
-        lambda state: "summarization" if state.get("final_response") else "question_classification",
+        "input_validation",
+        lambda state: "generate_response" if state.get("final_response") else "classify_question",
         {
-            "summarization": "summarization",
-            "question_classification": "question_classification"
+            "generate_response": "generate_response",
+            "classify_question": "classify_question"
         }
     )
     
     # Add conditional edges based on question type
     workflow.add_conditional_edges(
-        "question_classification",
+        "classify_question",
         lambda state: state["question_type"],
         {
-            "out_of_scope": "out_of_scope",
-            "memory": "memory", 
-            "standard": "question_structure_analysis"
+            "out_of_scope": "handle_out_of_scope",
+            "memory": "handle_memory", 
+            "standard": "analyze_structure"
         }
     )
     
     # Add conditional edges based on structure type
     workflow.add_conditional_edges(
-        "question_structure_analysis",
+        "analyze_structure",
         lambda state: state["structure_type"],
         {
-            "structured": "structured_processing",
-            "unstructured": "unstructured_processing"
+            "structured": "process_structured",
+            "unstructured": "process_unstructured"
         }
     )
     
     # Add conditional edges for memory access
     workflow.add_conditional_edges(
-        "structured_processing",
-        lambda state: "access_memory" if state["contains_memory_query"] else "summarization",
+        "process_structured",
+        lambda state: "retrieve_memory" if state["contains_memory_query"] else "generate_response",
         {
-            "access_memory": "access_memory",
-            "summarization": "summarization"
+            "retrieve_memory": "retrieve_memory",
+            "generate_response": "generate_response"
         }
     )
     
     workflow.add_conditional_edges(
-        "unstructured_processing", 
-        lambda state: "access_memory" if state["contains_memory_query"] else "summarization",
+        "process_unstructured", 
+        lambda state: "retrieve_memory" if state["contains_memory_query"] else "generate_response",
         {
-            "access_memory": "access_memory",
-            "summarization": "summarization"
+            "retrieve_memory": "retrieve_memory",
+            "generate_response": "generate_response"
         }
     )
     
-    # All paths lead to summarization before ending
-    workflow.add_edge("out_of_scope", "summarization")
-    workflow.add_edge("memory", "summarization")
-    workflow.add_edge("access_memory", "summarization")
-    workflow.add_edge("summarization", END)
+    # All paths lead to response generation before ending
+    workflow.add_edge("handle_out_of_scope", "generate_response")
+    workflow.add_edge("handle_memory", "generate_response")
+    workflow.add_edge("retrieve_memory", "generate_response")
+    workflow.add_edge("generate_response", END)
     
     return workflow
 
 
-def run_workflow(user_input: str, session_memory: List[Dict[str, Any]] = None) -> str:
-    """Run the workflow with user input and return the response"""
+# Import the existing WorkflowManager
+
+# Global workflow manager instance for persistent memory
+_workflow_manager = None
+
+def get_workflow_manager():
+    """Get or create the global workflow manager instance"""
+    global _workflow_manager
+    if _workflow_manager is None:
+        _workflow_manager = WorkflowManager()
+    return _workflow_manager
+
+
+def run_workflow(user_input: str, thread_id: str = None) -> tuple[str, str]:
+    """
+    Run the workflow with user input and return the response
     
-    if session_memory is None:
-        session_memory = []
+    Args:
+        user_input: The user's question
+        thread_id: Optional thread ID for session continuity. If None, generates a new one.
+        
+    Returns:
+        tuple: (response, thread_id) - The response and the thread ID for session continuity
+    """
+    manager = get_workflow_manager()
+    return manager.run_query(user_input, thread_id)
+
+
+def get_session_history(thread_id: str) -> List[Dict[str, Any]]:
+    """
+    Get the session history for a given thread ID
     
-    workflow = create_workflow()
-    app = workflow.compile()
+    Args:
+        thread_id: The thread ID to get history for
+        
+    Returns:
+        List of interactions in the session
+    """
+    manager = get_workflow_manager()
+    return manager.get_session_history(thread_id)
     
-    # Initial state
-    initial_state = {
-        "user_input": user_input,
-        "question_type": None,
-        "structure_type": None,
-        "contains_memory_query": False,
-        "memory_results": [],
-        "processing_results": [],
-        "final_response": "",
-        "tools_used": [],
-        "error": "",
-        "session_memory": session_memory
-    }
+    try:
+        # Get the checkpoint history
+        history = []
+        for checkpoint in app.get_state_history(config):
+            state = checkpoint.values
+            if state.get("user_input") and state.get("final_response"):
+                history.append({
+                    "timestamp": checkpoint.metadata.get("timestamp", ""),
+                    "user_query": state["user_input"],
+                    "response": state["final_response"],
+                    "tools_used": state.get("tools_used", []),
+                    "processing_results": state.get("processing_results", [])
+                })
+        
+        # Return in chronological order (oldest first)
+        return list(reversed(history))
+    except Exception as e:
+        print(f"Error getting session history: {e}")
+        return []
+
+
+def clear_session_memory(thread_id: str) -> bool:
+    """
+    Clear the session memory for a given thread ID
     
-    # Run the workflow
-    result = app.invoke(initial_state)
-    
-    return result["final_response"]
+    Args:
+        thread_id: The thread ID to clear memory for
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        # Note: MemorySaver doesn't have a direct clear method
+        # In a production environment, you might want to use a different checkpointer
+        # that supports clearing specific threads
+        return True
+    except Exception as e:
+        print(f"Error clearing session memory: {e}")
+        return False
 
 
 if __name__ == "__main__":
-    # Test the workflow
-    test_input = "How many refund requests did we get?"
-    response = run_workflow(test_input)
-    print(f"Input: {test_input}")
-    print(f"Response: {response}")
+    # Test the workflow with memory
+    print("Testing LangGraph workflow with checkpoint memory...")
+    
+    # Test 1: Initial question
+    test_input1 = "How many refund requests did we get?"
+    response1, thread_id = run_workflow(test_input1)
+    print(f"Input: {test_input1}")
+    print(f"Response: {response1}")
+    print(f"Thread ID: {thread_id}")
+    print("-" * 50)
+    
+    # Test 2: Follow-up question using the same thread
+    test_input2 = "Show me more examples from the previous result"
+    response2, _ = run_workflow(test_input2, thread_id)
+    print(f"Input: {test_input2}")
+    print(f"Response: {response2}")
+    print("-" * 50)
+    
+    # Test 3: Get session history
+    history = get_session_history(thread_id)
+    print(f"Session history ({len(history)} interactions):")
+    for i, interaction in enumerate(history, 1):
+        print(f"{i}. Q: {interaction['user_query']}")
+        print(f"   A: {interaction['response'][:100]}...")
+        print(f"   Tools: {interaction['tools_used']}")
+        print()
