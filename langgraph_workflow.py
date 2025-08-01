@@ -41,7 +41,9 @@ class WorkflowState(TypedDict):
     final_response: str
     tools_used: List[str]
     error: str
-    # session_memory is now managed by LangGraph checkpoint system
+    # Memory-related fields
+    thread_id: Optional[str]  # Thread ID for memory access
+    session_history: Optional[List[Dict[str, Any]]]  # Pre-loaded session history
 
 
 def user_input_node(state: WorkflowState) -> WorkflowState:
@@ -480,13 +482,45 @@ def unstructured_processing_node(state: WorkflowState) -> WorkflowState:
 def access_memory_node(state: WorkflowState) -> WorkflowState:
     """
     Access memory system when processing nodes need historical context
+    This node uses the session_history pre-loaded in the state by WorkflowManager
     """
-    # TODO: Implement memory access
-    # - Query relevant past interactions
-    # - Add context to processing results
+    user_input = state["user_input"]
+    session_history = state.get("session_history", [])
     
-    memory_results = state.get("memory_results", [])
-    # Add new memory results
+    if session_history:
+        try:
+            # Use the session history to provide memory context
+            memory_context = get_memory_context(session_history, "recent")
+            
+            # Create memory results with relevant context
+            memory_results = [
+                {
+                    "type": "checkpoint_memory",
+                    "history_count": len(session_history),
+                    "recent_interactions": session_history[-3:] if len(session_history) >= 3 else session_history,
+                    "memory_context": memory_context,
+                    "user_query": user_input
+                }
+            ]
+            
+            # If the user query seems to reference previous interactions,
+            # try to find relevant context
+            if any(keyword in user_input.lower() for keyword in ["previous", "before", "last", "earlier"]):
+                relevant_interactions = []
+                for interaction in session_history[-5:]:  # Check last 5 interactions
+                    if any(word in interaction.get("user_query", "").lower() for word in user_input.lower().split()):
+                        relevant_interactions.append(interaction)
+                
+                if relevant_interactions:
+                    memory_results.append({
+                        "type": "relevant_context",
+                        "interactions": relevant_interactions
+                    })
+                    
+        except Exception as e:
+            memory_results = [{"type": "memory_error", "error": str(e)}]
+    else:
+        memory_results = [{"type": "no_memory", "message": "No previous interactions found in this session"}]
     
     return {
         **state,
@@ -620,7 +654,6 @@ def create_workflow() -> StateGraph:
 
 
 # Import the existing WorkflowManager
-from workflow_manager import WorkflowManager
 
 # Global workflow manager instance for persistent memory
 _workflow_manager = None

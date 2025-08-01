@@ -52,7 +52,7 @@ class WorkflowManager:
             response = access_session_memory(user_input, session_history)
             
             # Still run through workflow to maintain state consistency
-            initial_state = self._create_initial_state(user_input)
+            initial_state = self._create_initial_state(user_input, thread_id)
             initial_state["final_response"] = response
             initial_state["tools_used"] = ["session_memory"]
             
@@ -61,7 +61,7 @@ class WorkflowManager:
             return result["final_response"], thread_id
         else:
             # Run normal workflow
-            initial_state = self._create_initial_state(user_input)
+            initial_state = self._create_initial_state(user_input, thread_id)
             
             # Add memory context if available
             if session_history:
@@ -70,9 +70,9 @@ class WorkflowManager:
             result = self.app.invoke(initial_state, config)
             return result["final_response"], thread_id
     
-    def _create_initial_state(self, user_input: str) -> Dict[str, Any]:
-        """Create initial state for workflow"""
-        return {
+    def _create_initial_state(self, user_input: str, thread_id: str = None) -> Dict[str, Any]:
+        """Create initial state for workflow with memory context"""
+        initial_state = {
             "user_input": user_input,
             "question_type": None,
             "structure_type": None,
@@ -83,6 +83,15 @@ class WorkflowManager:
             "tools_used": [],
             "error": ""
         }
+        
+        # Add memory context if thread_id is available
+        if thread_id:
+            initial_state["thread_id"] = thread_id
+            # Pre-load session history for access_memory_node
+            session_history = self.get_session_history(thread_id)
+            initial_state["session_history"] = session_history
+        
+        return initial_state
     
     def get_session_history(self, thread_id: str) -> List[Dict[str, Any]]:
         """
