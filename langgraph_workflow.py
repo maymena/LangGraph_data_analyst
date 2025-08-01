@@ -585,9 +585,10 @@ def summarization_node(state: WorkflowState, llm_tools=None) -> WorkflowState:
     # Save to persistent user memory
     user_name = state.get("user_name", "")
     if user_name:
-        # TODO: chnage to be compatible with the new memory code
+        # TODO: change to be compatible with the new memory code
         # from tools.user_memory import save_user_conversation_history
         # save_user_conversation_history(user_name, session_memory)
+        pass
     
     return {
         **state,
@@ -630,9 +631,10 @@ def identification_input_node(state: WorkflowState) -> WorkflowState:
     # Save to persistent user memory
     user_name = state.get("user_name", "")
     if user_name:
-        # TODO: chnage to be compatible with the new memory code
+        # TODO: change to be compatible with the new memory code
         # from tools.user_memory import save_user_conversation_history
         # save_user_conversation_history(user_name, session_memory)
+        pass
     
     return {
         **state,
@@ -665,15 +667,15 @@ def create_workflow(llm_tools=None) -> StateGraph:
     
     workflow.add_node("generate_response", summarization_node_with_tools)
     
-    # Set entry point to identification node
-    workflow.set_entry_point("identification_input")
+    # Set entry point to input validation node
+    workflow.set_entry_point("input_validation")
     
-    # Add conditional edge: if identification successful, go to user_input; else, go to summarization
+    # Add conditional edge: if identification successful, go to input_validation; else, go to summarization
     workflow.add_conditional_edges(
         "identification_input",
-        lambda state: "user_input" if state.get("is_identified") else "generate_response",
+        lambda state: "input_validation" if state.get("is_identified") else "generate_response",
         {
-            "user_input": "user_input",
+            "input_validation": "input_validation",
             "generate_response": "generate_response" # TODO: think if we need to save this failed interaction
         }
     )
