@@ -122,8 +122,7 @@ def summarize(user_request: str, intent: Optional[str] = None, category: Optiona
     Returns:
         Dictionary with the summary
     """
-    import openai
-    import os
+    from tools.llm_utils import call_llm
     
     # Filter the dataset based on intent and category if provided
     filtered_df = df.copy()
@@ -140,7 +139,17 @@ def summarize(user_request: str, intent: Optional[str] = None, category: Optiona
     if total_count == 0:
         return {"summary": "No data found matching the specified criteria."}
     
-    # Sample conversations to send to the LLM
+    # For count requests, return the count directly
+    if "count" in user_request.lower():
+        return {
+            "summary": f"There are {total_count} conversations matching the criteria.",
+            "count": total_count,
+            "details": f"Found {total_count} conversations" + 
+                      (f" with intent '{intent}'" if intent else "") +
+                      (f" in category '{category}'" if category else "")
+        }
+    
+    # Sample conversations to send to the LLM for other requests
     # Limit to a reasonable number to avoid token limits
     sample_size = min(20, total_count)
     sample_data = filtered_df.sample(sample_size)[['instruction', 'intent', 'category', 'response']]
@@ -164,41 +173,23 @@ The summary should include:
 3. Key phrases or approaches used by agents
 4. Any notable insights about how these conversations are handled
 
+Total conversations matching criteria: {total_count}
+
 Conversations:
 {formatted_data}
 """
     
-    # Call the OpenAI API for summarization using Nebius endpoint
-    client = openai.OpenAI(
-        base_url="https://api.studio.nebius.com/v1/",
-        api_key=os.environ.get("NEBIUS_API_KEY")
-    )
-    
     try:
-        response = client.chat.completions.create(
-            model="Qwen/Qwen3-30B-A3B",  # Using Qwen model
-            messages=[
-                {"role": "system", "content": "You are an AI assistant that summarizes customer service conversations."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=1000  # Adjust as needed
-        )
+        # Use the same LLM client as everywhere else
+        summary_text = call_llm(prompt)
         
-        summary = response.choices[0].message.content
-        
-        # Add context about the data
-        summary_with_context = f"Summary based on analysis of {total_count} conversations"
-        if intent:
-            summary_with_context += f" with intent '{intent}'"
-        if category:
-            summary_with_context += f" in category '{category}'"
-        summary_with_context += f":\n\n{summary}"
-        
-        return {"summary": summary_with_context}
-    
+        return {
+            "summary": summary_text,
+            "total_conversations": total_count,
+            "sample_size": sample_size
+        }
     except Exception as e:
-        return {"summary": f"Error generating summary: {str(e)}. Please try again with different parameters."}
-
+        return {"summary": f"Error generating summary: {str(e)}", "error": str(e)}
 def get_intent_distribution(top_n: int = 10, category: Optional[str] = None) -> Dict[str, Any]:
     """
     Get the distribution of intents in the dataset.
@@ -270,7 +261,7 @@ def show_dataframe(data_type: str = "all", limit: int = 20) -> Dict[str, Any]:
 TOOL_FUNCTIONS = {
     "select_semantic_intent": select_semantic_intent,
     "select_semantic_category": select_semantic_category,
-    "sum": sum_numbers,
+    "sum_numbers": sum_numbers,
     "count_category": count_category,
     "count_intent": count_intent,
     "show_examples": show_examples,
@@ -278,5 +269,5 @@ TOOL_FUNCTIONS = {
     "get_intent_distribution": get_intent_distribution,
     "get_category_distribution": get_category_distribution,
     "show_dataframe": show_dataframe,
-    "finish": lambda answer: {"answer": answer}
+    "finish": lambda answer: {"final_answer": answer}  # Special finish function
 }
