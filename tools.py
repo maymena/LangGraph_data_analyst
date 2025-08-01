@@ -117,18 +117,62 @@ class LLMTools:
         """Initialize with LLM client"""
         self.llm_client = llm_client
     
-    def summarize(self, user_request: str, data: List[Dict[str, Any]]) -> str:
-        """Generate a summary based on user request and data"""
+    def call_llm(self, prompt: str) -> str:
+        """Generic LLM calling method"""
         if not self.llm_client:
-            # Fallback to simple summarization
-            return f"Summary for '{user_request}': Found {len(data)} relevant items."
+            return "LLM client not available"
         
-        # TODO: Implement LLM-based summarization
-        # - Format data for LLM
-        # - Create prompt
-        # - Generate summary
+        response = self.llm_client.chat.completions.create(
+            model="Qwen/Qwen3-30B-A3B",
+            temperature=0,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return response.choices[0].message.content.strip()
+    
+    def summarize(self, user_input: str, processing_results: List[Dict[str, Any]], 
+                                memory_results: List[Dict[str, Any]], session_memory: List[Dict[str, Any]], 
+                                tools_used: List[str]) -> str:
+        """
+        Generate a coherent, user-friendly response from workflow state information.
         
-        return f"LLM-generated summary for '{user_request}'"
+        Args:
+            user_input: The user's original question
+            processing_results: Results from processing nodes
+            memory_results: Results from memory operations
+            session_memory: Recent session interactions
+            tools_used: List of tools used in processing
+            
+        Returns:
+            A coherent response string
+        """
+        if not self.llm_client:
+            # Fallback response
+            return f"Analysis complete for: {user_input}. Tools used: {', '.join(tools_used)}"
+        
+        summary_prompt = f"""
+        Generate a coherent, user-friendly response based on the following information:
+
+        User Question: {user_input}
+        
+        Processing Results: {json.dumps(processing_results, indent=2)}
+        
+        Memory Results: {json.dumps(memory_results, indent=2)}
+        
+        Session Memory (recent interactions): {json.dumps(session_memory[-3:] if session_memory else [], indent=2)}
+        
+        Tools Used: {tools_used}
+
+        Please create a clear, comprehensive response that:
+        1. Directly answers the user's question
+        2. Incorporates relevant information from processing results
+        3. References previous context if available in session memory
+        4. Is conversational and helpful
+        5. Avoids technical jargon unless necessary
+        
+        Response:
+        """
+        
+        return self.call_llm(summary_prompt)
     
     def classify_question(self, question: str) -> Dict[str, Any]:
         """Classify question type and structure"""

@@ -18,6 +18,8 @@ df = load_dataset_df()
 
 class WorkflowState(TypedDict):
     """State object that flows through the workflow"""
+    user_name: str  # User identification
+    is_identified: bool  # Whether user has been identified
     user_input: str
     question_type: Literal["out_of_scope", "memory", "standard"]
     structure_type: Literal["structured", "unstructured"] 
@@ -415,7 +417,7 @@ def access_memory_node(state: WorkflowState) -> WorkflowState:
     }
 
 
-def summarization_node(state: WorkflowState) -> WorkflowState:
+def summarization_node(state: WorkflowState, llm_tools=None) -> WorkflowState:
     """
     Always called before output:
     1. Summarize the results into a coherent response
@@ -431,30 +433,18 @@ def summarization_node(state: WorkflowState) -> WorkflowState:
     if state.get("final_response"):
         final_response = state["final_response"]
     else:
-        # Use LLM to generate a coherent response from all available information
-        summary_prompt = f"""
-        Generate a coherent, user-friendly response based on the following information:
-
-        User Question: {user_input}
-        
-        Processing Results: {json.dumps(processing_results, indent=2)}
-        
-        Memory Results: {json.dumps(memory_results, indent=2)}
-        
-        Session Memory (recent interactions): {json.dumps(session_memory[-3:] if session_memory else [], indent=2)}
-        
-        Tools Used: {tools_used}
-
-        Please create a clear, comprehensive response that:
-        1. Directly answers the user's question
-        2. Incorporates relevant information from processing results
-        3. References previous context if available in session memory
-        4. Is conversational and helpful
-        5. Avoids technical jargon unless necessary
-        
-        """
-        
-        final_response = call_llm(prompt=summary_prompt)
+        # Use LLMTools to generate a coherent response from all available information
+        if llm_tools:
+            final_response = llm_tools.summarize(
+                user_input=user_input,
+                processing_results=processing_results,
+                memory_results=memory_results,
+                session_memory=session_memory,
+                tools_used=tools_used
+            )
+        else:
+            # Fallback to simple response if LLMTools not available
+            final_response = f"Analysis complete for: {user_input}. Tools used: {', '.join(tools_used)}"
     
     # Save interaction to session memory
     interaction = {
@@ -467,6 +457,13 @@ def summarization_node(state: WorkflowState) -> WorkflowState:
     }
     session_memory.append(interaction)
     
+    # Save to persistent user memory
+    user_name = state.get("user_name", "")
+    if user_name:
+        # TODO: chnage to be compatible with the new memory code
+        # from tools.user_memory import save_user_conversation_history
+        # save_user_conversation_history(user_name, session_memory)
+    
     return {
         **state,
         "final_response": final_response,
@@ -474,7 +471,48 @@ def summarization_node(state: WorkflowState) -> WorkflowState:
     }
 
 
-def create_workflow() -> StateGraph:
+def identification_input_node(state: WorkflowState) -> WorkflowState:
+    """
+    First node in the workflow - handles user identification and session setup.
+    This node runs only once at the start of each session.
+    """
+    # Get user name from state (will be set by Streamlit app)
+    user_name = state.get("user_name", "")
+    
+    if not user_name or user_name.strip() == "":
+        # If no user name provided, return error state
+        return {
+            **state,
+            "error": "User identification required. Please provide your name.",
+            "final_response": "Please enter your name to continue."
+        }
+    
+    # Check if user exists and load their conversation history
+    
+    # TODO: change to be compatible with the new memory code
+    # from tools.user_memory import get_user_conversation_history, create_new_user
+    # user_history = get_user_conversation_history(user_name)
+    
+    if user_history is None:
+        # New user - create entry
+        create_new_user(user_name)
+        session_memory = []
+        welcome_message = f"Welcome {user_name}! I'm your customer service data analyst assistant. How can I help you today?"
+    else:
+        # Existing user - load their history
+        session_memory = user_history
+        welcome_message = f"Welcome back {user_name}! I remember our previous conversations. How can I help you today?"
+    
+    return {
+        **state,
+        "user_name": user_name,
+        "session_memory": session_memory,
+        "is_identified": True,
+        "final_response": welcome_message
+    }
+
+
+def create_workflow(llm_tools=None) -> StateGraph:
     """Create and configure the LangGraph workflow"""
     
     workflow = StateGraph(WorkflowState)
@@ -488,10 +526,26 @@ def create_workflow() -> StateGraph:
     workflow.add_node("structured_processing", structured_processing_node)
     workflow.add_node("unstructured_processing", unstructured_processing_node)
     workflow.add_node("access_memory", access_memory_node)
-    workflow.add_node("summarization", summarization_node)
+    workflow.add_node("identification_input", identification_input_node)
     
-    # Set entry point to user_input node
-    workflow.set_entry_point("user_input")
+    # Create a closure to pass llm_tools to summarization_node
+    def summarization_node_with_tools(state: WorkflowState) -> WorkflowState:
+        return summarization_node(state, llm_tools)
+    
+    workflow.add_node("summarization", summarization_node_with_tools)
+    
+    # Set entry point to identification node
+    workflow.set_entry_point("identification_input")
+    
+    # Add conditional edge: if identification successful, go to user_input; else, go to summarization
+    workflow.add_conditional_edges(
+        "identification_input",
+        lambda state: "user_input" if state.get("is_identified") else "summarization",
+        {
+            "user_input": "user_input",
+            "summarization": "summarization" # TODO: think if we need to svae this failed interaction
+        }
+    )
     
     # Add conditional edge: if input is valid, go to question_classification; else, go to summarization
     workflow.add_conditional_edges(
@@ -552,17 +606,16 @@ def create_workflow() -> StateGraph:
     return workflow
 
 
-def run_workflow(user_input: str, session_memory: List[Dict[str, Any]] = None) -> str:
+def run_workflow(user_input: str, user_name: str = "", session_memory: List[Dict[str, Any]] = None, llm_tools=None) -> str:
     """Run the workflow with user input and return the response"""
     
-    if session_memory is None:
-        session_memory = []
-    
-    workflow = create_workflow()
+    workflow = create_workflow(llm_tools=llm_tools)
     app = workflow.compile()
     
     # Initial state
     initial_state = {
+        "user_name": user_name,
+        "is_identified": False,
         "user_input": user_input,
         "question_type": None,
         "structure_type": None,
@@ -572,7 +625,7 @@ def run_workflow(user_input: str, session_memory: List[Dict[str, Any]] = None) -
         "final_response": "",
         "tools_used": [],
         "error": "",
-        "session_memory": session_memory
+        "session_memory": session_memory or []
     }
     
     # Run the workflow
