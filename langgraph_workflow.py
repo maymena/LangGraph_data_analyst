@@ -104,7 +104,15 @@ Respond with ONLY one word: "out_of_scope", "memory", or "standard"."""
     try:
         # Call LLM for classification
         llm_response = call_llm(classification_prompt)
-        question_type = llm_response.strip().lower()
+        
+        # Extract the final answer from the response (handle <think> tags)
+        if "</think>" in llm_response:
+            # Extract text after the last </think> tag
+            final_answer = llm_response.split("</think>")[-1].strip()
+        else:
+            final_answer = llm_response.strip()
+        
+        question_type = final_answer.lower()
         
         # Validate response and fallback to rule-based if needed
         if question_type not in ["out_of_scope", "memory", "standard"]:
@@ -170,17 +178,30 @@ def memory_node(state: WorkflowState) -> WorkflowState:
     This node is called when the question is classified as a "memory" type question
     """
     user_input = state["user_input"]
+    session_history = state.get("session_history", [])
     
-    # Note: In the checkpoint system, we can't directly access the history here
-    # The memory access will be handled by the compiled app with checkpointer
-    # For now, we provide a placeholder response that indicates memory access is needed
-    
-    response = "I understand you're asking about our previous conversation. Let me check our interaction history to provide you with the relevant information."
+    if session_history:
+        # Use the session history to generate a memory-based response
+        response = access_session_memory(user_input, session_history)
+        tools_used = ["session_memory"]
+        memory_results = [
+            {
+                "type": "memory_query", 
+                "query": user_input,
+                "history_count": len(session_history),
+                "response_generated": True
+            }
+        ]
+    else:
+        response = "I don't have any previous conversation history to reference."
+        tools_used = []
+        memory_results = [{"type": "no_memory", "message": "No session history available"}]
     
     return {
         **state,
-        "memory_results": [{"type": "memory_query", "query": user_input}],
-        "final_response": response
+        "memory_results": memory_results,
+        "final_response": response,
+        "tools_used": tools_used
     }
 
 

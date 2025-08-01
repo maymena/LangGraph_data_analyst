@@ -50,52 +50,55 @@ def access_session_memory(user_input: str, session_history: List[Dict[str, Any]]
 
 def should_use_session_memory(user_input: str, has_session_history: bool = False) -> bool:
     """
-    Determine if session memory should be used for this question
+    Determine if session memory should be used for this question using LLM
     
     Args:
         user_input: The user's question
         has_session_history: Whether there is session history available
         
     Returns:
-        True if session memory should be used, False otherwise
+        True if session memory should be used directly (bypass workflow), False otherwise
     """
     if not has_session_history:
         return False
     
-    user_input_lower = user_input.lower()
+    # Use LLM to determine if this is a direct memory question
+    memory_detection_prompt = f"""
+    Analyze the following user question and determine if it's asking for information from previous conversation history.
+
+    User question: "{user_input}"
+
+    A question should be classified as a DIRECT MEMORY question if it:
+    1. Explicitly asks about what was said before (e.g., "What did you tell me before?", "You mentioned something about...")
+    2. Asks to repeat or recall previous responses (e.g., "Tell me again", "Repeat what you said")
+    3. References previous conversation directly (e.g., "From our conversation", "You said earlier")
+
+    A question should NOT be classified as direct memory if it:
+    1. Asks for examples or details about a topic mentioned before (these should go through workflow with memory context)
+    2. Asks for analysis or recommendations based on previous data (these should go through workflow)
+    3. Is a follow-up question that needs new processing (e.g., "Show me examples from that category")
+
+    Respond with only "YES" if this is a direct memory question that should bypass the workflow entirely.
+    Respond with only "NO" if this should go through the workflow (possibly with memory context).
+    """
     
-    # Memory-related keywords and phrases
-    memory_keywords = [
-        "remember", "previous", "before", "earlier", "last time", 
-        "you said", "we discussed", "from before", "what did you tell me",
-        "you mentioned", "from our conversation", "show me more",
-        "more examples", "continue", "as before", "as above",
-        "previously shown", "another example", "last", "recent",
-        "what was", "what were", "tell me again", "repeat"
-    ]
-    
-    # Check for explicit memory references
-    has_memory_keywords = any(keyword in user_input_lower for keyword in memory_keywords)
-    
-    # Check for follow-up patterns
-    followup_patterns = [
-        r"show me more",
-        r"more examples?",
-        r"what about the",
-        r"and the",
-        r"also show",
-        r"what was the last",
-        r"from the previous",
-        r"continue with",
-        r"tell me more about"
-    ]
-    
-    has_followup_pattern = any(re.search(pattern, user_input_lower) for pattern in followup_patterns)
-    
-    # Check if the question is very short and likely a follow-up
-    is_short_followup = len(user_input.split()) <= 4 and any(word in user_input_lower for word in ["more", "another", "continue", "next", "again"])
-    
-    return has_memory_keywords or has_followup_pattern or is_short_followup
+    try:
+        llm_response = call_llm(memory_detection_prompt)
+        
+        # Extract the final answer from the response (handle <think> tags)
+        if "</think>" in llm_response:
+            # Extract text after the last </think> tag
+            final_answer = llm_response.split("</think>")[-1].strip()
+        else:
+            final_answer = llm_response.strip()
+        
+        is_direct_memory = final_answer.upper() == "YES"
+        return is_direct_memory
+    except Exception as e:
+        print(f"Error in LLM memory detection: {e}")
+        # Fallback to simple keyword check for critical cases
+        direct_memory_keywords = ["what did you tell me", "what did you say", "you said", "tell me again"]
+        return any(keyword in user_input.lower() for keyword in direct_memory_keywords)
 
 
 def get_memory_context(session_history: List[Dict[str, Any]], context_type: str = "recent") -> str:
