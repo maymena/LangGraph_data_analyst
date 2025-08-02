@@ -46,6 +46,9 @@ class WorkflowState(TypedDict):
     # Memory-related fields
     thread_id: Optional[str]  # Thread ID for memory access
     session_history: Optional[List[Dict[str, Any]]]  # Pre-loaded session history
+    # Persistent memory fields
+    persistent_context: Optional[List[Dict[str, Any]]]  # Persistent memory context
+    user_record: Optional[Dict[str, Any]]  # User record from persistent memory
 
 
 def user_input_node(state: WorkflowState) -> WorkflowState:
@@ -289,7 +292,9 @@ def extract_tool_call_from_response(response: str) -> Optional[ToolCallResponse]
         return None
 
 
-def react_loop(system_prompt: str, user_input: str, allowed_tools: List[str], session_history: List[Dict[str, Any]] = None) -> tuple[str, List[Dict[str, Any]], List[str]]:
+def react_loop(system_prompt: str, user_input: str, allowed_tools: List[str], 
+               session_history: List[Dict[str, Any]] = None, 
+               persistent_context: List[Dict[str, Any]] = None) -> tuple[str, List[Dict[str, Any]], List[str]]:
     """
     Execute a ReAct loop with the given system prompt, user input, and allowed tools.
     
@@ -338,9 +343,13 @@ def react_loop(system_prompt: str, user_input: str, allowed_tools: List[str], se
                 # Execute the tool
                 if function_name in TOOL_FUNCTIONS:
                     try:
-                        # Special handling for memory tool - pass session_history
-                        if function_name == "memory" and session_history is not None:
-                            tool_result = TOOL_FUNCTIONS[function_name](context=session_history, **function_args)
+                        # Special handling for memory tool - pass both session and persistent context
+                        if function_name == "memory":
+                            tool_result = TOOL_FUNCTIONS[function_name](
+                                context=session_history, 
+                                persistent_context=persistent_context,
+                                **function_args
+                            )
                         else:
                             tool_result = TOOL_FUNCTIONS[function_name](**function_args)
                     except Exception as e:
@@ -381,6 +390,7 @@ def structured_processing_node(state: WorkflowState) -> WorkflowState:
     """
     user_input = state["user_input"]
     session_history = state.get("session_history", [])
+    persistent_context = state.get("persistent_context", [])
 
     system_prompt = (
         "You are an AI assistant that helps answer questions about a customer service dataset.\n"
@@ -434,7 +444,7 @@ def structured_processing_node(state: WorkflowState) -> WorkflowState:
     )
 
     allowed_tools = ["select_semantic_intent", "select_semantic_category", "sum_numbers", "count_category", "count_intent", "get_intent_distribution", "get_category_distribution", "memory", "finish"]
-    final_response, processing_results, tools_used = react_loop(system_prompt, user_input, allowed_tools, session_history)
+    final_response, processing_results, tools_used = react_loop(system_prompt, user_input, allowed_tools, session_history, persistent_context)
 
     return {
         **state,
@@ -457,6 +467,7 @@ def unstructured_processing_node(state: WorkflowState) -> WorkflowState:
     """
     user_input = state["user_input"]
     session_history = state.get("session_history", [])
+    persistent_context = state.get("persistent_context", [])
 
     system_prompt = (
         "You are an AI assistant that helps answer unstructured questions about a customer service dataset.\n"
@@ -501,7 +512,7 @@ def unstructured_processing_node(state: WorkflowState) -> WorkflowState:
     )
 
     allowed_tools = ["select_semantic_intent", "select_semantic_category", "show_examples", "summarize", "show_dataframe", "memory", "finish"]
-    final_response, processing_results, tools_used = react_loop(system_prompt, user_input, allowed_tools, session_history)
+    final_response, processing_results, tools_used = react_loop(system_prompt, user_input, allowed_tools, session_history, persistent_context)
 
     return {
         **state,
@@ -607,51 +618,51 @@ def summarization_node(state: WorkflowState, llm_tools=None) -> WorkflowState:
 
 def identification_input_node(state: WorkflowState) -> WorkflowState:
     """
-    First node in the workflow - handles user identification and session setup.
+    First node in the workflow - handles user identification and persistent memory setup.
     This node runs only once at the start of each session.
     """
+    from tools.persistent_memory import get_or_create_user, get_persistent_memory_context
+    
     # Get user name from state (will be set by Streamlit app)
     user_name = state.get("user_name", "")
     
     if not user_name or user_name.strip() == "":
-        # If no user name provided, return error state
+        # If no user name provided, ask for identification
         return {
             **state,
-            "error": "User identification required. Please provide your name.",
-            "final_response": "Please enter your name to continue."
+            "final_response": "Please enter your name to continue.",
+            "is_identified": False
         }
     
-    # Check if user exists and load their conversation history
-    
-    # TODO: change to be compatible with the new memory code
-    # from tools.user_memory import get_user_conversation_history, create_new_user
-    # user_history = get_user_conversation_history(user_name)
-    
-    if user_history is None:
-        # New user - create entry
-        create_new_user(user_name)
-        session_memory = []
-        welcome_message = f"Welcome {user_name}! I'm your customer service data analyst assistant. How can I help you today?"
-    else:
-        # Existing user - load their history
-        session_memory = user_history
-        welcome_message = f"Welcome back {user_name}! I remember our previous conversations. How can I help you today?"
-    
-    # Save to persistent user memory
-    user_name = state.get("user_name", "")
-    if user_name:
-        # TODO: change to be compatible with the new memory code
-        # from tools.user_memory import save_user_conversation_history
-        # save_user_conversation_history(user_name, session_memory)
-        pass
-    
-    return {
-        **state,
-        "user_name": user_name,
-        "session_memory": session_memory, # TODO: check if it is compatible with the new memory code
-        "is_identified": True,
-        "final_response": welcome_message
-    }
+    try:
+        # Get or create user record in persistent memory
+        user_record = get_or_create_user(user_name)
+        
+        # Load persistent memory context (last 20 interactions)
+        persistent_context = get_persistent_memory_context(user_name, limit=20)
+        
+        # Create welcome message
+        if user_record["total_interactions"] == 0:
+            welcome_message = f"Welcome {user_name}! I'm your customer service data analyst. How can I help you today?"
+        else:
+            welcome_message = f"Welcome back {user_name}! I have {user_record['total_interactions']} previous interactions in my memory. How can I help you today?"
+        
+        return {
+            **state,
+            "user_name": user_name,
+            "persistent_context": persistent_context,
+            "user_record": user_record,
+            "final_response": welcome_message,
+            "is_identified": True
+        }
+        
+    except Exception as e:
+        return {
+            **state,
+            "final_response": f"Error setting up your profile: {str(e)}. Please try again.",
+            "is_identified": False,
+            "error": str(e)
+        }
 
 
 def create_workflow(llm_tools=None) -> StateGraph:
@@ -676,8 +687,8 @@ def create_workflow(llm_tools=None) -> StateGraph:
     
     workflow.add_node("generate_response", summarization_node_with_tools)
     
-    # Set entry point to input validation node
-    workflow.set_entry_point("input_validation")
+    # Set entry point to identification node for user identification
+    workflow.set_entry_point("identification_input")
     
     # Add conditional edge: if identification successful, go to input_validation; else, go to summarization
     workflow.add_conditional_edges(

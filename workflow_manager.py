@@ -26,13 +26,14 @@ class WorkflowManager:
         self.memory = MemorySaver()
         self.app = self.workflow.compile(checkpointer=self.memory)
     
-    def run_query(self, user_input: str, thread_id: Optional[str] = None) -> Tuple[str, str]:
+    def run_query(self, user_input: str, thread_id: Optional[str] = None, user_name: Optional[str] = None) -> Tuple[str, str]:
         """
         Run a query with memory support
         
         Args:
             user_input: The user's question
             thread_id: Optional thread ID for session continuity
+            user_name: Optional username for persistent memory
             
         Returns:
             Tuple of (response, thread_id)
@@ -52,16 +53,21 @@ class WorkflowManager:
             response = access_session_memory(user_input, session_history)
             
             # Still run through workflow to maintain state consistency
-            initial_state = self._create_initial_state(user_input, thread_id)
+            initial_state = self._create_initial_state(user_input, thread_id, user_name)
             initial_state["final_response"] = response
             initial_state["tools_used"] = ["session_memory"]
             
             # Save this interaction to checkpoint
             result = self.app.invoke(initial_state, config)
+            
+            # Save to persistent memory if user_name provided
+            if user_name:
+                self._save_to_persistent_memory(user_name, user_input, response, ["session_memory"], "memory", None)
+            
             return result["final_response"], thread_id
         else:
             # Run normal workflow
-            initial_state = self._create_initial_state(user_input, thread_id)
+            initial_state = self._create_initial_state(user_input, thread_id, user_name)
             
             # Add memory context if available
             if session_history:
@@ -70,7 +76,7 @@ class WorkflowManager:
             result = self.app.invoke(initial_state, config)
             return result["final_response"], thread_id
     
-    def _create_initial_state(self, user_input: str, thread_id: str = None) -> Dict[str, Any]:
+    def _create_initial_state(self, user_input: str, thread_id: str = None, user_name: str = None) -> Dict[str, Any]:
         """Create initial state for workflow with memory context"""
         initial_state = {
             "user_input": user_input,
@@ -81,7 +87,11 @@ class WorkflowManager:
             "processing_results": [],
             "final_response": "",
             "tools_used": [],
-            "error": ""
+            "error": "",
+            "user_name": user_name or "",
+            "is_identified": bool(user_name),
+            "persistent_context": [],
+            "user_record": None
         }
         
         # Add memory context if thread_id is available
@@ -91,7 +101,51 @@ class WorkflowManager:
             session_history = self.get_session_history(thread_id)
             initial_state["session_history"] = session_history
         
+        # Load persistent memory context if user_name provided
+        if user_name:
+            try:
+                from tools.persistent_memory import get_persistent_memory_context, get_or_create_user
+                persistent_context = get_persistent_memory_context(user_name, limit=20)
+                user_record = get_or_create_user(user_name)
+                initial_state["persistent_context"] = persistent_context
+                initial_state["user_record"] = user_record
+            except Exception as e:
+                print(f"Error loading persistent memory for {user_name}: {e}")
+        
         return initial_state
+    
+    def _save_to_persistent_memory(self, user_name: str, user_input: str, response: str, 
+                                 tools_used: List[str], question_type: str = None, 
+                                 structure_type: str = None, processing_results: List[Dict] = None) -> bool:
+        """
+        Save interaction to persistent memory
+        
+        Args:
+            user_name: Username
+            user_input: User's question
+            response: Agent's response
+            tools_used: List of tools used
+            question_type: Type of question
+            structure_type: Structure type
+            processing_results: Processing results
+            
+        Returns:
+            True if successful
+        """
+        try:
+            from tools.persistent_memory import save_interaction_to_persistent_memory
+            interaction = {
+                "user_query": user_input,
+                "response": response,
+                "tools_used": tools_used,
+                "question_type": question_type,
+                "structure_type": structure_type,
+                "processing_results": processing_results or []
+            }
+            return save_interaction_to_persistent_memory(user_name, interaction)
+        except Exception as e:
+            print(f"Error saving to persistent memory: {e}")
+            return False
     
     def get_session_history(self, thread_id: str) -> List[Dict[str, Any]]:
         """
