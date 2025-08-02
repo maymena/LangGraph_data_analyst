@@ -255,7 +255,8 @@ def show_dataframe(data_type: str = "all", limit: int = 20) -> Dict[str, Any]:
         "dataframe": result_df.to_dict('records'),
         "columns": result_df.columns.tolist(),
         "shape": result_df.shape,
-        "pandas_df": result_df  # This will be used by the app to display as a pandas dataframe
+        "data_type": data_type,
+        "limit": limit
     }
 
 # Map function names to their implementations
