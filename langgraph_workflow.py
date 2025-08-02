@@ -75,8 +75,8 @@ def question_classification_node(state: WorkflowState) -> WorkflowState:
 
 The dataset contains customer service conversations with the following columns:
 - instruction: Customer queries/requests
-- category: Service categories (like 'account', 'order', 'delivery', 'payment', etc.)
-- intent: Specific customer intents (like 'cancel_order', 'get_refund', 'track_order', etc.)
+- category: Service categories {list(df['category'].unique())}
+- intent: Specific customer intents {list(df['intent'].unique())}
 - response: Agent responses to customer queries
 
 Classify the following user question into exactly one of these three categories:
@@ -101,12 +101,23 @@ Classify the following user question into exactly one of these three categories:
    - Questions that mention dataset-related terms even if phrased generally
    - Memory + math questions: "What is the previous answer plus 100?"
    - Memory + analysis questions: "Based on what you told me before, show me examples"
-   Examples: "How many refund requests?", "What are common categories?", "Summarize delivery issues", "What is the answer of the previous question plus 100?", "Based on the previous analysis, what would you recommend?"
+   - Questions about the dataset itself, its structure, or what data is available
+   - Questions asking for suggestions about what can be asked or what's in scope
+   - Questions asking "what is the data", "what data do we have", "what kind of data", etc.
+   - Questions asking for guidance on what questions can be asked
+   - Follow-up questions asking for additional details, strategies, tactics, or deeper analysis
+   - Questions asking "what are the main tactics", "how do agents respond", "what strategies do they use", "what approaches", etc.
+   - Questions that build upon or expand on previous topics discussed
+   Examples: "How many refund requests?", "What are common categories?", "Summarize delivery issues", "What is the answer of the previous question plus 100?", "Based on the previous analysis, what would you recommend?", "What is the data?", "What kind of data do we have?", "Any suggestion for a question I can ask you?", "What's in scope?", "What can I ask you about?", "What are the main tactics of response?", "How do agents respond to that?", "What strategies are used?"
 
 Important: 
 - If a question combines memory with ANY other operation (math, analysis, examples), classify as "standard"
 - If a question mentions dataset-related terms like "intent", "category", "refund", "order", etc., it should be classified as "standard" even if it uses words like "last" or "previous"
+- If a question asks about the dataset, data, or what can be asked, classify as "standard"
+- If a question asks for additional details, tactics, strategies, or deeper analysis (even without explicit dataset terms), classify as "standard"
 - Only classify as "memory" if the question ONLY wants to recall what was previously said without any processing
+- Questions asking "what is the data", "what data do we have", "any suggestions", "what can I ask" should be classified as "standard"
+
 
 User question: "{user_input}"
 
@@ -150,14 +161,20 @@ def _fallback_classification(user_input: str) -> str:
                        "cancel", "track", "payment", "billing", "support"]
     has_dataset_keywords = any(keyword in user_input_lower for keyword in dataset_keywords)
     
+    # Check for questions about data or suggestions
+    data_questions = ["what is the data", "what data", "what kind of data", "what data do we have",
+                     "suggestion about what can i ask", "suggest a question", "what can i ask", "what can you tell me", "what should i ask",
+                     "what's in scope", "what is in scope", "scope fo this app", "what can i ask you about"]
+    has_data_questions = any(phrase in user_input_lower for phrase in data_questions)
+    
     # Check for memory-related keywords
     memory_keywords = ["remember", "previous", "before", "earlier", "last time", 
                       "you said", "we discussed", "from before", "what did you tell me",
                       "you mentioned", "from our conversation"]
     has_memory_keywords = any(keyword in user_input_lower for keyword in memory_keywords)
     
-    # If it has dataset keywords, it's standard (even if it has memory keywords)
-    if has_dataset_keywords:
+    # If it has dataset keywords or data questions, it's standard (even if it has memory keywords)
+    if has_dataset_keywords or has_data_questions:
         return "standard"
     
     # If it has memory keywords but no dataset keywords, it's memory
@@ -238,7 +255,15 @@ def question_structure_analysis_node(state: WorkflowState) -> WorkflowState:
     user_input = state["user_input"]
 
     # LLM-based structure analysis
-    prompt = f"""Decide whether the {user_input} is a structured or unstructured question.\nThe schema of the dataset is: {str(df.dtypes.to_dict())}.\nThe unique values of the category column are: {str(list(df['category'].unique()))}.\nThe unique values of the intent column are: {str(list(df['intent'].unique()))}.\n\nGiven a user question, respond with a string 'structured' or 'unstructured'.\nStructured questions are questions that inquire about the frequency or the values of the categories in the category column or the intent column. For example:\n• 'what are all the categories'\n• 'What categories exist?' \n• 'What are all the values in the category column?'\n• 'What are all the values in the intent column?'\n• 'Show examples of category'\n• 'provide 10 examples of Category order'\n• 'which intents exist when category is account?'\n• 'do we have category order with intent other than cancel order?'\n• 'What are the most frequent categories?' \n• 'What are the most frequent intents?' \n• 'Which intents are most frequent?'\n•  'Which categories are most frequent?'\nunstructured questions are questions that answering them require using examples, insights, analysis or summary of the 'instruction' or 'response' column even if the word instruction or response is not mentioned literally in the user question. For example:\n• 'Summarize Category invoice'\n• 'Show 5 examples of intent View invoice'\n• 'Summarize how agent respond to Intent Delivery options'\n• 'what customers ask or request regarding Newsletter subscription'\n• 'give 6 examples of customer questions about contact'\n• 'can you find requests that have replies which are inadequate' \nRespond with ONLY the word 'structured' or 'unstructured' and nothing else."""
+    prompt = f"""Decide whether the {user_input} is a structured or unstructured question.
+    The schema of the dataset is: {str(df.dtypes.to_dict())}.
+    The unique values of the category column are: {str(list(df['category'].unique()))}.
+    The unique values of the intent column are: {str(list(df['intent'].unique()))}.
+    \nGiven a user question, respond with a string 'structured' or 'unstructured'.
+    \nStructured questions are questions that inquire about the frequency or the values of the categories in the category column or the intent column. 
+    For example:\n• 'what are all the categories'\n• 'What categories exist?' \n• 'What are all the values in the category column?'\n• 'What are all the values in the intent column?'\n• 'Show examples of category'\n• 'provide 10 examples of Category {list(df['category'].unique())[0] if len(list(df['category'].unique())) > 0 else "order"}'\n• 'which intents exist when category is {list(df['category'].unique())[0] if len(list(df['category'].unique())) > 0 else "account"}?'\n• 'do we have category {list(df['category'].unique())[0] if len(list(df['category'].unique())) > 0 else "order"} with intent other than {list(df['intent'].unique())[0] if len(list(df['intent'].unique())) > 0 else "cancel_order"}?'\n• 'What are the most frequent categories?' \n• 'What are the most frequent intents?' \n• 'Which intents are most frequent?'\n•  'Which categories are most frequent?'
+    \nunstructured questions are questions that answering them require using examples, insights, analysis or summary of the 'instruction' or 'response' column even if the word instruction or response is not mentioned literally in the user question. For example:\n• 'Summarize Category {list(df['category'].unique())[0] if len(list(df['category'].unique())) > 0 else "invoice"}'\n• 'Show 5 examples of intent {list(df['intent'].unique())[0] if len(list(df['intent'].unique())) > 0 else "View invoice"}'\n• 'Summarize how agent respond to Intent {list(df['intent'].unique())[0] if len(list(df['intent'].unique())) > 0 else "Delivery options"}'\n• 'what customers ask or request regarding Newsletter subscription'\n• 'give 6 examples of customer questions about contact'\n• 'can you find requests that have replies which are inadequate' 
+    \nRespond with ONLY the word 'structured' or 'unstructured' and nothing else."""
     llm_response = call_llm(prompt)
     structure_type = llm_response.strip().lower()
     if structure_type not in ["structured", "unstructured"]:
@@ -455,8 +480,9 @@ def structured_processing_node(state: WorkflowState) -> WorkflowState:
         "  Step 3: Call finish() with the result\n"
         "- For 'How many refund requests?': Call count_category('REFUND') or select_semantic_category(['REFUND']).\n"
         "\n"
-        "The dataset contains customer service conversations with intents and categories.\n"
-        "Categories include ACCOUNT, ORDER, REFUND, INVOICE, etc.\n"
+        f"The dataset contains customer service conversations with intents and categories.\n"
+        f"Categories include: {', '.join(list(df['category'].unique()))}\n"
+        f"Intents include: {', '.join(list(df['intent'].unique()))}\n"
         "\n"
         "You are only allowed to use the tools listed above."
     )
@@ -526,8 +552,9 @@ def unstructured_processing_node(state: WorkflowState) -> WorkflowState:
         "4. Synthesize the results into a clear, comprehensive answer.\n"
         "5. When you have the final answer, call the finish tool.\n"
         "\n"
-        "The dataset contains customer service conversations with intents and categories.\n"
-        "Categories include ACCOUNT, ORDER, REFUND, INVOICE, etc.\n"
+        f"The dataset contains customer service conversations with intents and categories.\n"
+        f"Categories include: {', '.join(list(df['category'].unique()))}\n"
+        f"Intents include: {', '.join(list(df['intent'].unique()))}\n"
         "\n"
         "For unstructured questions, focus on providing insights, summaries, and examples rather than just counts or distributions.\n"
         "You are only allowed to use the tools listed above."

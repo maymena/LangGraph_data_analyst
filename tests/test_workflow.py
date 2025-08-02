@@ -26,7 +26,7 @@ def test_workflow():
         "Show me examples of delivery issues",
         "what are all the intents?",
         "what are all the categories?",
-        "Show examples of Category account",
+        "Show examples of Category account", 
         "Show intent distributions",
         "can you give me an example of canceled order?",
         "how many people asked to get a refund?",
@@ -37,9 +37,9 @@ def test_workflow():
         "How do I track the status of my order?",
         
         # Memory questions
-        "What did you tell me before?",
+        "What did you tell me before?",  
         "Remember the categories we discussed?",
-        "Show me more examples from the previous result",
+        "Show me more examples from the previous result", 
         "What was the last intent you mentioned?",
         "Can you repeat what you said earlier?",
         "What did we talk about previously?",
@@ -61,7 +61,7 @@ def test_workflow():
         "From what you said before, what was it?",
         "What did you mention earlier about this?",
         
-        # Out of scope questions
+        # # Out of scope questions
         "What's the weather like today?",
         "Tell me about sports news",
         "How do I cook pasta?",
@@ -94,7 +94,7 @@ def test_workflow():
         "what data do we have?",
         "what is the data",
         
-        # Scope clarification questions
+        # # Scope clarification questions
         "ok whats in scope then?",
         "any suggestion for a question i can ask you"
     ]
