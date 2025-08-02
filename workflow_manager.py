@@ -237,7 +237,7 @@ class WorkflowManager:
 workflow_manager = WorkflowManager()
 
 
-def run_workflow_with_memory(user_input: str, thread_id: Optional[str] = None) -> Tuple[str, str]:
+def run_workflow_with_memory(user_input: str, thread_id: Optional[str] = None, user_name: str = None) -> Tuple[str, str]:
     """
     Convenience function to run workflow with memory
     
@@ -248,7 +248,7 @@ def run_workflow_with_memory(user_input: str, thread_id: Optional[str] = None) -
     Returns:
         Tuple of (response, thread_id)
     """
-    return workflow_manager.run_query(user_input, thread_id)
+    return workflow_manager.run_query(user_input, thread_id, user_name)
 
 
 def get_session_history(thread_id: str) -> List[Dict[str, Any]]:

@@ -641,18 +641,14 @@ def identification_input_node(state: WorkflowState) -> WorkflowState:
         # Load persistent memory context (last 20 interactions)
         persistent_context = get_persistent_memory_context(user_name, limit=20)
         
-        # Create welcome message
-        if user_record["total_interactions"] == 0:
-            welcome_message = f"Welcome {user_name}! I'm your customer service data analyst. How can I help you today?"
-        else:
-            welcome_message = f"Welcome back {user_name}! I have {user_record['total_interactions']} previous interactions in my memory. How can I help you today?"
+        # Don't set final_response here - let the workflow continue processing
+        # The welcome message logic should be handled elsewhere if needed
         
         return {
             **state,
             "user_name": user_name,
             "persistent_context": persistent_context,
             "user_record": user_record,
-            "final_response": welcome_message,
             "is_identified": True
         }
         
@@ -663,6 +659,14 @@ def identification_input_node(state: WorkflowState) -> WorkflowState:
             "is_identified": False,
             "error": str(e)
         }
+
+
+def route_after_identification(state: WorkflowState) -> str:
+    """Route after user identification"""
+    if state.get("is_identified", False):
+        return "input_validation"
+    else:
+        return "end"
 
 
 def create_workflow(llm_tools=None) -> StateGraph:
@@ -689,6 +693,16 @@ def create_workflow(llm_tools=None) -> StateGraph:
     
     # Set entry point to identification node for user identification
     workflow.set_entry_point("identification_input")
+    
+    # Route from identification to input validation if user is identified
+    workflow.add_conditional_edges(
+        "identification_input",
+        route_after_identification,
+        {
+            "input_validation": "input_validation",
+            "end": END
+        }
+    )
     
     # Add conditional edge: if identification successful, go to input_validation; else, go to summarization
     workflow.add_conditional_edges(
