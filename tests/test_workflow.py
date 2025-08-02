@@ -3,6 +3,17 @@
 Test script for the complete workflow with question classification
 """
 
+import sys
+import os
+
+# Add the parent directory to Python path
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
+# Change working directory to parent directory
+os.chdir(parent_dir)
+
 from workflow_manager import WorkflowManager
 
 def test_workflow():
