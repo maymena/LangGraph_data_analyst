@@ -190,23 +190,37 @@ def memory_node(state: WorkflowState) -> WorkflowState:
     """
     user_input = state["user_input"]
     session_history = state.get("session_history", [])
+    persistent_context = state.get("persistent_context", [])
     
+    # Combine session and persistent memory
+    combined_history = []
+    
+    # Add persistent memory first (older interactions)
+    if persistent_context:
+        combined_history.extend(persistent_context)
+    
+    # Add session memory last (most recent interactions)  
     if session_history:
-        # Use the session history to generate a memory-based response
-        response = access_session_memory(user_input, session_history)
-        tools_used = ["session_memory"]
+        combined_history.extend(session_history)
+    
+    if combined_history:
+        # Use the combined history to generate a memory-based response
+        response = access_session_memory(user_input, combined_history)
+        tools_used = ["session_memory", "persistent_memory"]
         memory_results = [
             {
                 "type": "memory_query", 
                 "query": user_input,
-                "history_count": len(session_history),
+                "session_history_count": len(session_history),
+                "persistent_history_count": len(persistent_context),
+                "total_history_count": len(combined_history),
                 "response_generated": True
             }
         ]
     else:
         response = "I don't have any previous conversation history to reference."
         tools_used = []
-        memory_results = [{"type": "no_memory", "message": "No session history available"}]
+        memory_results = [{"type": "no_memory", "message": "No session or persistent history available"}]
     
     return {
         **state,
