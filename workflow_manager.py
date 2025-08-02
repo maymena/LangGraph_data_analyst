@@ -11,6 +11,7 @@ from tools.session_memory import (
     summarize_session_memory,
     get_memory_context
 )
+from tools.llm_utils import clean_llm_response
 import uuid
 import datetime
 
@@ -26,7 +27,7 @@ class WorkflowManager:
         self.memory = MemorySaver()
         self.app = self.workflow.compile(checkpointer=self.memory)
     
-    def run_query(self, user_input: str, thread_id: Optional[str] = None, user_name: Optional[str] = None) -> Tuple[str, str]:
+    def run_query(self, user_input: str, thread_id: Optional[str] = None, user_name: Optional[str] = None) -> Tuple[str, str, List[str]]:
         """
         Run a query with memory support
         
@@ -36,7 +37,7 @@ class WorkflowManager:
             user_name: Optional username for persistent memory
             
         Returns:
-            Tuple of (response, thread_id)
+            Tuple of (response, thread_id, tools_used)
         """
         # Generate thread ID if not provided
         if thread_id is None:
@@ -51,20 +52,22 @@ class WorkflowManager:
         if is_memory_query and session_history:
             # Handle memory query directly
             response = access_session_memory(user_input, session_history)
+            cleaned_response = clean_llm_response(response)
+            tools_used = ["session_memory"]
             
             # Still run through workflow to maintain state consistency
             initial_state = self._create_initial_state(user_input, thread_id, user_name)
-            initial_state["final_response"] = response
-            initial_state["tools_used"] = ["session_memory"]
+            initial_state["final_response"] = cleaned_response
+            initial_state["tools_used"] = tools_used
             
             # Save this interaction to checkpoint
             result = self.app.invoke(initial_state, config)
             
             # Save to persistent memory if user_name provided
             if user_name:
-                self._save_to_persistent_memory(user_name, user_input, response, ["session_memory"], "memory", None)
+                self._save_to_persistent_memory(user_name, user_input, cleaned_response, tools_used, "memory", None)
             
-            return result["final_response"], thread_id
+            return result["final_response"], thread_id, tools_used
         else:
             # Run normal workflow
             initial_state = self._create_initial_state(user_input, thread_id, user_name)
@@ -74,7 +77,24 @@ class WorkflowManager:
                 initial_state["contains_memory_query"] = True
             
             result = self.app.invoke(initial_state, config)
-            return result["final_response"], thread_id
+            
+            # Clean the response to remove think tags
+            cleaned_response = clean_llm_response(result["final_response"])
+            tools_used = result.get("tools_used", [])
+            
+            # Save to persistent memory if user_name provided
+            if user_name:
+                self._save_to_persistent_memory(
+                    user_name, 
+                    user_input, 
+                    cleaned_response,  # Save the cleaned response
+                    tools_used,
+                    result.get("question_type", ""),
+                    result.get("structure_type", ""),
+                    result.get("processing_results", [])
+                )
+            
+            return cleaned_response, thread_id, tools_used
     
     def _create_initial_state(self, user_input: str, thread_id: str = None, user_name: str = None) -> Dict[str, Any]:
         """Create initial state for workflow with memory context"""

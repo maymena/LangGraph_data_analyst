@@ -1,4 +1,5 @@
 import os
+import re
 from typing import Optional
 from openai import OpenAI
 
@@ -33,4 +34,26 @@ def call_llm(prompt: str, llm_client: Optional[object] = None, model: str = "Qwe
         temperature=temperature,
         messages=[{"role": "user", "content": prompt}]
     )
-    return response.choices[0].message.content.strip() 
+    return response.choices[0].message.content.strip()
+
+def clean_llm_response(response: str) -> str:
+    """
+    Clean LLM response by removing <think></think> tags and their content
+    
+    Args:
+        response: Raw LLM response that may contain think tags
+        
+    Returns:
+        Cleaned response without think tags
+    """
+    if not response:
+        return response
+    
+    # Remove <think>...</think> blocks (including multiline)
+    cleaned = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL)
+    
+    # Clean up any extra whitespace that might be left
+    cleaned = re.sub(r'\n\s*\n\s*\n', '\n\n', cleaned)  # Multiple newlines to double
+    cleaned = cleaned.strip()
+    
+    return cleaned

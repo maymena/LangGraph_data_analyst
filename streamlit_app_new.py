@@ -179,7 +179,8 @@ def show_welcome_message():
         st.session_state.messages.insert(0, {
             "role": "assistant",
             "content": welcome_msg,
-            "timestamp": datetime.now().strftime("%H:%M:%S")
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "tools_used": []  # No tools used for welcome message
         })
 
 def show_persistent_memory_info():
@@ -218,6 +219,10 @@ def main_chat_interface():
     # Display chat messages
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
+            # Show tools used for assistant messages
+            if message["role"] == "assistant" and "tools_used" in message and message["tools_used"]:
+                st.info(f"🔧 **Tools used:** {', '.join(message['tools_used'])}")
+            
             st.markdown(message["content"])
             if "timestamp" in message:
                 st.caption(f"⏰ {message['timestamp']}")
@@ -250,7 +255,7 @@ def main_chat_interface():
                         st.error("No user name found in session state!")
                         return
                     
-                    response, thread_id = st.session_state.workflow_manager.run_query(
+                    response, thread_id, tools_used = st.session_state.workflow_manager.run_query(
                         user_input=prompt,
                         thread_id=st.session_state.session_id,
                         user_name=current_user_name
@@ -260,16 +265,21 @@ def main_chat_interface():
                     if thread_id != st.session_state.session_id:
                         st.session_state.session_id = thread_id
                     
+                    # Display tools used above the response
+                    if tools_used:
+                        st.info(f"🔧 **Tools used:** {', '.join(tools_used)}")
+                    
                     # Display response
                     st.markdown(response)
                     response_timestamp = datetime.now().strftime("%H:%M:%S")
                     st.caption(f"⏰ {response_timestamp}")
                     
-                    # Add assistant response to chat history
+                    # Add assistant response to chat history with tools used
                     st.session_state.messages.append({
                         "role": "assistant",
                         "content": response,
-                        "timestamp": response_timestamp
+                        "timestamp": response_timestamp,
+                        "tools_used": tools_used  # Store tools used in message history
                     })
                     
                     # Update user record in session state (it gets updated by the workflow)
@@ -288,7 +298,8 @@ def main_chat_interface():
                     st.session_state.messages.append({
                         "role": "assistant",
                         "content": error_msg,
-                        "timestamp": datetime.now().strftime("%H:%M:%S")
+                        "timestamp": datetime.now().strftime("%H:%M:%S"),
+                        "tools_used": []  # No tools used for error messages
                     })
 
 def show_dataset_info():
