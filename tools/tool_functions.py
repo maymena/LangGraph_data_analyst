@@ -3,6 +3,7 @@ import pandas as pd
 import openai
 import os
 from data.download_dataset import load_dataset_df
+from tools.memory_tool import memory_tool
 
 # Load the dataset
 df = load_dataset_df()
@@ -269,5 +270,6 @@ TOOL_FUNCTIONS = {
     "get_intent_distribution": get_intent_distribution,
     "get_category_distribution": get_category_distribution,
     "show_dataframe": show_dataframe,
+    "memory": memory_tool,  # Add memory tool
     "finish": lambda answer: {"final_answer": answer}  # Special finish function
 }

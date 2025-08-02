@@ -46,6 +46,9 @@ class WorkflowState(TypedDict):
     # Memory-related fields
     thread_id: Optional[str]  # Thread ID for memory access
     session_history: Optional[List[Dict[str, Any]]]  # Pre-loaded session history
+    # Persistent memory fields
+    persistent_context: Optional[List[Dict[str, Any]]]  # Persistent memory context
+    user_record: Optional[Dict[str, Any]]  # User record from persistent memory
 
 
 def user_input_node(state: WorkflowState) -> WorkflowState:
@@ -84,20 +87,26 @@ Classify the following user question into exactly one of these three categories:
    - Questions about topics outside customer service domain
    Examples: "What's the weather?", "How do I cook pasta?", "Tell me about sports"
 
-2. "memory" - Questions that explicitly reference previous interactions or conversations:
-   - Questions using words like "remember", "previous", "before", "earlier", "last time"
-   - Questions asking "what did you tell me", "from our conversation", "you mentioned"
-   - Follow-up questions referencing prior specific answers or results
-   Examples: "What did you tell me before?", "Remember the categories we discussed?", "Show me more examples from the previous result"
+2. "memory" - Questions that ONLY need to recall what was said before (pure memory recall):
+   - Direct questions asking to repeat previous responses: "What did you tell me before?", "Repeat what you said"
+   - Questions asking about conversation history: "What did we discuss?", "You mentioned something earlier"
+   - Simple recall requests: "Tell me again", "What was your last response?"
+   Examples: "What did you tell me before about categories?", "You said something about refunds earlier"
 
-3. "standard" - Questions that require analyzing the customer service dataset:
-   - Questions about categories, intents, distributions, counts, examples
+3. "standard" - Questions that require analyzing the dataset OR combining memory with other operations:
+   - Questions about categories, intents, distributions, counts, examples from the dataset
    - Questions asking for summaries, insights, or analysis of customer service data
+   - Questions that combine memory with calculations, analysis, or processing
    - Questions about customer service patterns, agent responses, or dataset content
    - Questions that mention dataset-related terms even if phrased generally
-   Examples: "How many refund requests?", "What are common categories?", "Summarize delivery issues", "What was the last intent you mentioned?" (this refers to dataset intents)
+   - Memory + math questions: "What is the previous answer plus 100?"
+   - Memory + analysis questions: "Based on what you told me before, show me examples"
+   Examples: "How many refund requests?", "What are common categories?", "Summarize delivery issues", "What is the answer of the previous question plus 100?", "Based on the previous analysis, what would you recommend?"
 
-Important: If a question mentions dataset-related terms like "intent", "category", "refund", "order", etc., it should be classified as "standard" even if it uses words like "last" or "previous".
+Important: 
+- If a question combines memory with ANY other operation (math, analysis, examples), classify as "standard"
+- If a question mentions dataset-related terms like "intent", "category", "refund", "order", etc., it should be classified as "standard" even if it uses words like "last" or "previous"
+- Only classify as "memory" if the question ONLY wants to recall what was previously said without any processing
 
 User question: "{user_input}"
 
@@ -283,7 +292,9 @@ def extract_tool_call_from_response(response: str) -> Optional[ToolCallResponse]
         return None
 
 
-def react_loop(system_prompt: str, user_input: str, allowed_tools: List[str]) -> tuple[str, List[Dict[str, Any]], List[str]]:
+def react_loop(system_prompt: str, user_input: str, allowed_tools: List[str], 
+               session_history: List[Dict[str, Any]] = None, 
+               persistent_context: List[Dict[str, Any]] = None) -> tuple[str, List[Dict[str, Any]], List[str]]:
     """
     Execute a ReAct loop with the given system prompt, user input, and allowed tools.
     
@@ -291,6 +302,7 @@ def react_loop(system_prompt: str, user_input: str, allowed_tools: List[str]) ->
         system_prompt: The system prompt for the LLM
         user_input: The user's question
         allowed_tools: List of tool names that are allowed to be used
+        session_history: Session history for memory tool
         
     Returns:
         tuple: (final_response, processing_results, tools_used)
@@ -331,7 +343,15 @@ def react_loop(system_prompt: str, user_input: str, allowed_tools: List[str]) ->
                 # Execute the tool
                 if function_name in TOOL_FUNCTIONS:
                     try:
-                        tool_result = TOOL_FUNCTIONS[function_name](**function_args)
+                        # Special handling for memory tool - pass both session and persistent context
+                        if function_name == "memory":
+                            tool_result = TOOL_FUNCTIONS[function_name](
+                                context=session_history, 
+                                persistent_context=persistent_context,
+                                **function_args
+                            )
+                        else:
+                            tool_result = TOOL_FUNCTIONS[function_name](**function_args)
                     except Exception as e:
                         tool_result = {"error": str(e)}
                 else:
@@ -358,7 +378,7 @@ def react_loop(system_prompt: str, user_input: str, allowed_tools: List[str]) ->
 def structured_processing_node(state: WorkflowState) -> WorkflowState:
     """
     Handle structured questions using dataset tools via LLM ReAct approach.
-    The LLM can use only the following tools:
+    The LLM can use the following tools:
     - select_semantic_intent(intent_name: List[str])
     - select_semantic_category(category_name: List[str])
     - sum_numbers(a: float, b: float)
@@ -366,14 +386,11 @@ def structured_processing_node(state: WorkflowState) -> WorkflowState:
     - count_intent(intent: str)
     - get_intent_distribution(top_n: int = 10, category: Optional[str] = None)
     - get_category_distribution(top_n: int = 10)
+    - memory(query: str): Access previous conversation history
     """
     user_input = state["user_input"]
-
-    # Memory context will be provided by the checkpoint system
-    # The memory access is handled through the workflow's memory management
-    memory_context = ""
-    if state.get("contains_memory_query", False):
-        memory_context = "\n\nNote: This question references previous interactions. Use the conversation history to provide context."
+    session_history = state.get("session_history", [])
+    persistent_context = state.get("persistent_context", [])
 
     system_prompt = (
         "You are an AI assistant that helps answer questions about a customer service dataset.\n"
@@ -385,6 +402,7 @@ def structured_processing_node(state: WorkflowState) -> WorkflowState:
         "- count_intent(intent: str): Count conversations with an intent.\n"
         "- get_intent_distribution(top_n: int = 10, category: Optional[str] = None): Get the distribution of intents.\n"
         "- get_category_distribution(top_n: int = 10): Get the distribution of categories.\n"
+        "- memory(query: str): Access previous conversation history to retrieve information from past interactions.\n"
         "\n"
         "CRITICAL: You MUST respond with ONLY a JSON object. Do not include any other text, thinking, or explanations.\n"
         "\n"
@@ -406,22 +424,27 @@ def structured_processing_node(state: WorkflowState) -> WorkflowState:
         "\n"
         "Follow these steps:\n"
         "1. Understand the user's question.\n"
-        "2. Determine which tools you need to use to answer the question.\n"
-        "3. Call the appropriate tools with the right parameters using the JSON format above.\n"
-        "4. Synthesize the results into a clear answer.\n"
-        "5. When you have the final answer, call the finish tool.\n"
+        "2. If the question references previous interactions, use the memory tool first to get the relevant information.\n"
+        "3. Extract the specific data you need from the memory result (e.g., numbers, categories).\n"
+        "4. Use other tools as needed (e.g., sum_numbers for calculations, select_semantic_category for data queries).\n"
+        "5. Synthesize the results into a clear answer.\n"
+        "6. When you have the final answer, call the finish tool.\n"
+        "\n"
+        "Examples:\n"
+        "- For 'What is the previous answer plus 100?': \n"
+        "  Step 1: Call memory('what was the previous answer') to get the number\n"
+        "  Step 2: Call sum_numbers(previous_number, 100) to calculate\n"
+        "  Step 3: Call finish() with the result\n"
+        "- For 'How many refund requests?': Call count_category('REFUND') or select_semantic_category(['REFUND']).\n"
         "\n"
         "The dataset contains customer service conversations with intents and categories.\n"
-        "The dataset includes various intents like edit_account, switch_account, check_invoice, etc.\n"
         "Categories include ACCOUNT, ORDER, REFUND, INVOICE, etc.\n"
         "\n"
-        "For out-of-scope questions not related to the dataset, politely explain that you can only answer questions about the customer service dataset.\n"
         "You are only allowed to use the tools listed above."
-        + memory_context
     )
 
-    allowed_tools = ["select_semantic_intent", "select_semantic_category", "sum_numbers", "count_category", "count_intent", "get_intent_distribution", "get_category_distribution", "finish"]
-    final_response, processing_results, tools_used = react_loop(system_prompt, user_input, allowed_tools)
+    allowed_tools = ["select_semantic_intent", "select_semantic_category", "sum_numbers", "count_category", "count_intent", "get_intent_distribution", "get_category_distribution", "memory", "finish"]
+    final_response, processing_results, tools_used = react_loop(system_prompt, user_input, allowed_tools, session_history, persistent_context)
 
     return {
         **state,
@@ -434,19 +457,17 @@ def structured_processing_node(state: WorkflowState) -> WorkflowState:
 def unstructured_processing_node(state: WorkflowState) -> WorkflowState:
     """
     Handle unstructured questions requiring analysis and summarization using LLM ReAct approach.
-    The LLM can use only the following tools:
+    The LLM can use the following tools:
     - select_semantic_intent(intent_name: List[str])
     - select_semantic_category(category_name: List[str])
     - show_examples(n: int = 3, intent: Optional[str] = None, category: Optional[str] = None)
     - summarize(user_request: str, intent: Optional[str] = None, category: Optional[str] = None)
     - show_dataframe(data_type: str = "all", limit: int = 20)
+    - memory(query: str): Access previous conversation history
     """
     user_input = state["user_input"]
-
-    # Memory context will be provided by the checkpoint system
-    memory_context = ""
-    if state.get("contains_memory_query", False):
-        memory_context = "\n\nNote: This question references previous interactions. Use the conversation history to provide context."
+    session_history = state.get("session_history", [])
+    persistent_context = state.get("persistent_context", [])
 
     system_prompt = (
         "You are an AI assistant that helps answer unstructured questions about a customer service dataset.\n"
@@ -456,6 +477,7 @@ def unstructured_processing_node(state: WorkflowState) -> WorkflowState:
         "- show_examples(n: int = 3, intent: Optional[str] = None, category: Optional[str] = None): Show n example conversations.\n"
         "- summarize(user_request: str, intent: Optional[str] = None, category: Optional[str] = None): Generate a summary based on user request.\n"
         "- show_dataframe(data_type: str = \"all\", limit: int = 20): Show the dataset as a pandas dataframe.\n"
+        "- memory(query: str): Access previous conversation history to retrieve information from past interactions.\n"
         "\n"
         "CRITICAL: You MUST respond with ONLY a JSON object. Do not include any other text, thinking, or explanations.\n"
         "\n"
@@ -477,22 +499,20 @@ def unstructured_processing_node(state: WorkflowState) -> WorkflowState:
         "\n"
         "Follow these steps:\n"
         "1. Understand the user's question (summarize, analyze, show examples, etc.).\n"
-        "2. Determine which tools you need to use to answer the question.\n"
-        "3. Call the appropriate tools with the right parameters using the JSON format above.\n"
+        "2. If the question references previous interactions, use the memory tool first.\n"
+        "3. Use other tools as needed to gather data and analysis.\n"
         "4. Synthesize the results into a clear, comprehensive answer.\n"
         "5. When you have the final answer, call the finish tool.\n"
         "\n"
         "The dataset contains customer service conversations with intents and categories.\n"
-        "The dataset includes various intents like edit_account, switch_account, check_invoice, etc.\n"
         "Categories include ACCOUNT, ORDER, REFUND, INVOICE, etc.\n"
         "\n"
         "For unstructured questions, focus on providing insights, summaries, and examples rather than just counts or distributions.\n"
         "You are only allowed to use the tools listed above."
-        + memory_context
     )
 
-    allowed_tools = ["select_semantic_intent", "select_semantic_category", "show_examples", "summarize", "show_dataframe", "finish"]
-    final_response, processing_results, tools_used = react_loop(system_prompt, user_input, allowed_tools)
+    allowed_tools = ["select_semantic_intent", "select_semantic_category", "show_examples", "summarize", "show_dataframe", "memory", "finish"]
+    final_response, processing_results, tools_used = react_loop(system_prompt, user_input, allowed_tools, session_history, persistent_context)
 
     return {
         **state,
@@ -598,51 +618,55 @@ def summarization_node(state: WorkflowState, llm_tools=None) -> WorkflowState:
 
 def identification_input_node(state: WorkflowState) -> WorkflowState:
     """
-    First node in the workflow - handles user identification and session setup.
+    First node in the workflow - handles user identification and persistent memory setup.
     This node runs only once at the start of each session.
     """
+    from tools.persistent_memory import get_or_create_user, get_persistent_memory_context
+    
     # Get user name from state (will be set by Streamlit app)
     user_name = state.get("user_name", "")
     
     if not user_name or user_name.strip() == "":
-        # If no user name provided, return error state
+        # If no user name provided, ask for identification
         return {
             **state,
-            "error": "User identification required. Please provide your name.",
-            "final_response": "Please enter your name to continue."
+            "final_response": "Please enter your name to continue.",
+            "is_identified": False
         }
     
-    # Check if user exists and load their conversation history
-    
-    # TODO: change to be compatible with the new memory code
-    # from tools.user_memory import get_user_conversation_history, create_new_user
-    # user_history = get_user_conversation_history(user_name)
-    
-    if user_history is None:
-        # New user - create entry
-        create_new_user(user_name)
-        session_memory = []
-        welcome_message = f"Welcome {user_name}! I'm your customer service data analyst assistant. How can I help you today?"
+    try:
+        # Get or create user record in persistent memory
+        user_record = get_or_create_user(user_name)
+        
+        # Load persistent memory context (last 20 interactions)
+        persistent_context = get_persistent_memory_context(user_name, limit=20)
+        
+        # Don't set final_response here - let the workflow continue processing
+        # The welcome message logic should be handled elsewhere if needed
+        
+        return {
+            **state,
+            "user_name": user_name,
+            "persistent_context": persistent_context,
+            "user_record": user_record,
+            "is_identified": True
+        }
+        
+    except Exception as e:
+        return {
+            **state,
+            "final_response": f"Error setting up your profile: {str(e)}. Please try again.",
+            "is_identified": False,
+            "error": str(e)
+        }
+
+
+def route_after_identification(state: WorkflowState) -> str:
+    """Route after user identification"""
+    if state.get("is_identified", False):
+        return "input_validation"
     else:
-        # Existing user - load their history
-        session_memory = user_history
-        welcome_message = f"Welcome back {user_name}! I remember our previous conversations. How can I help you today?"
-    
-    # Save to persistent user memory
-    user_name = state.get("user_name", "")
-    if user_name:
-        # TODO: change to be compatible with the new memory code
-        # from tools.user_memory import save_user_conversation_history
-        # save_user_conversation_history(user_name, session_memory)
-        pass
-    
-    return {
-        **state,
-        "user_name": user_name,
-        "session_memory": session_memory, # TODO: check if it is compatible with the new memory code
-        "is_identified": True,
-        "final_response": welcome_message
-    }
+        return "end"
 
 
 def create_workflow(llm_tools=None) -> StateGraph:
@@ -667,8 +691,18 @@ def create_workflow(llm_tools=None) -> StateGraph:
     
     workflow.add_node("generate_response", summarization_node_with_tools)
     
-    # Set entry point to input validation node
-    workflow.set_entry_point("input_validation")
+    # Set entry point to identification node for user identification
+    workflow.set_entry_point("identification_input")
+    
+    # Route from identification to input validation if user is identified
+    workflow.add_conditional_edges(
+        "identification_input",
+        route_after_identification,
+        {
+            "input_validation": "input_validation",
+            "end": END
+        }
+    )
     
     # Add conditional edge: if identification successful, go to input_validation; else, go to summarization
     workflow.add_conditional_edges(
