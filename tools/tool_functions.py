@@ -93,7 +93,7 @@ def show_examples(n: int = 3, intent: Optional[str] = None, category: Optional[s
         category: Optional category to filter by
         
     Returns:
-        Dictionary with examples
+        Dictionary with formatted examples
     """
     filtered_df = df.copy()
     
@@ -105,8 +105,23 @@ def show_examples(n: int = 3, intent: Optional[str] = None, category: Optional[s
     
     examples = filtered_df.head(n)[['instruction', 'intent', 'category', 'response']].to_dict('records')
     
+    # Format the examples into a readable string
+    formatted_examples = f"Found {len(filtered_df)} total conversations"
+    if intent:
+        formatted_examples += f" with intent '{intent}'"
+    if category:
+        formatted_examples += f" in category '{category}'"
+    formatted_examples += f". Showing {min(n, len(filtered_df))} examples:\n\n"
+    
+    for i, example in enumerate(examples, 1):
+        formatted_examples += f"**Example {i}:**\n"
+        formatted_examples += f"**Customer Question:** {example['instruction']}\n"
+        formatted_examples += f"**Intent:** {example['intent']}\n"
+        formatted_examples += f"**Category:** {example['category']}\n"
+        formatted_examples += f"**Agent Response:** {example['response']}\n\n"
+    
     return {
-        "examples": examples,
+        "examples": formatted_examples,
         "total_matching": len(filtered_df),
         "shown": min(n, len(filtered_df))
     }

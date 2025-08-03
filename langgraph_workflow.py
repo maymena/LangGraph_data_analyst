@@ -391,6 +391,14 @@ def react_loop(system_prompt: str, user_input: str, allowed_tools: List[str],
                             )
                         else:
                             tool_result = TOOL_FUNCTIONS[function_name](**function_args)
+                        
+                        # Special handling for show_examples tool - return examples directly
+                        if function_name == "show_examples" and "examples" in tool_result:
+                            # Only return examples directly if this is the only tool used or if only show_examples + finish were used
+                            if len(tools_used) == 1 or (len(tools_used) == 2 and "finish" in tools_used):
+                                final_response = tool_result["examples"]
+                                break
+                            
                     except Exception as e:
                         tool_result = {"error": str(e)}
                 else:
@@ -474,6 +482,7 @@ def structured_processing_node(state: WorkflowState) -> WorkflowState:
         "6. When you have the final answer, call the finish tool.\n"
         "\n"
         "Examples:\n"
+        "- For 'Show examples of cancel_order': Call show_examples(intent='cancel_order')\n"
         "- For 'What is the previous answer plus 100?': \n"
         "  Step 1: Call memory('what was the previous answer') to get the number\n"
         "  Step 2: Call sum_numbers(previous_number, 100) to calculate\n"
