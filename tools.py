@@ -6,7 +6,7 @@ Adapted from the original ReAct agent tools
 from typing import List, Dict, Any, Optional
 import pandas as pd
 from datasets import load_dataset
-
+import json
 
 class DatasetTools:
     """Tools for querying and analyzing the customer service dataset"""
