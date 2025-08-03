@@ -54,7 +54,7 @@ def run_langgraph_workflow(user_input: str, user_name: str = "") -> str:
         "final_response": "",
         "tools_used": [],
         "error": "",
-        "session_memory": []  # TODO: check if it is compatible with the new memory code
+        "session_memory": [] 
     }
     
     try:
@@ -90,13 +90,6 @@ def main():
             st.markdown("### Current User")
             st.markdown(f"**Name:** {st.session_state.user_name}")
             
-            # TODO: chnage to be compatible with the new memory code
-            # Show user stats
-            # from tools.user_memory import get_user_stats
-            # user_stats = get_user_stats(st.session_state.user_name)
-            # if user_stats:
-            #     st.markdown(f"**Conversations:** {user_stats.get('conversation_count', 0)}")
-            #     st.markdown(f"**Last seen:** {user_stats.get('last_seen', 'Unknown')[:10]}")
         
         st.markdown("---")
         st.markdown("### Features")
